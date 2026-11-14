@@ -51,7 +51,7 @@ impl Worktree {
         Some(Worktree::new(Git::new(path?), head?, branch, is_main))
     }
 
-    fn parse_list(output: &str) -> Vec<Worktree> {
+    pub(super) fn parse_list(output: &str) -> Vec<Worktree> {
         let mut worktrees = Vec::new();
         let blocks = output.split("\n\n");
 

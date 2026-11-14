@@ -1,6 +1,11 @@
+mod repo;
+mod workspace;
 mod worktree;
 
+pub use repo::Repo;
 use std::path::{Path, PathBuf};
+pub use workspace::Workspace;
+pub use worktree::Worktree;
 
 #[derive(Debug)]
 pub enum GitError {
@@ -11,6 +16,15 @@ pub enum GitError {
 impl From<std::io::Error> for GitError {
     fn from(value: std::io::Error) -> Self {
         GitError::Io(value)
+    }
+}
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitError::Io(err) => write!(f, "IO error: {}", err),
+            GitError::CommandFailed(msg) => write!(f, "Git command failed: {}", msg),
+        }
     }
 }
 
