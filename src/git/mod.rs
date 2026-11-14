@@ -1,3 +1,5 @@
+mod worktree;
+
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -12,19 +14,19 @@ impl From<std::io::Error> for GitError {
     }
 }
 
-pub(crate) struct Git {
+struct Git {
     dir: PathBuf,
 }
 impl Git {
-    pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
+    fn new(dir: impl Into<PathBuf>) -> Self {
         Git { dir: dir.into() }
     }
 
-    pub(crate) fn dir(&self) -> &Path {
+    fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
+    fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(self.dir())
