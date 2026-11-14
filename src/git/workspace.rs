@@ -21,10 +21,10 @@ impl Workspace {
                 Ok(entry) => {
                     let path = entry.path();
                     if path.join(".git").is_dir() {
-                        let repo = Repo::open(path);
+                        let repo = Repo::open(&path);
                         match repo {
                             Ok(repo) => repos.push(repo),
-                            Err(err) => eprintln!("Error opening repo: {}", err),
+                            Err(err) => eprintln!("Error opening {}: {}", path.display(), err),
                         }
                     }
                 }

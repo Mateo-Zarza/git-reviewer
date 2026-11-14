@@ -14,10 +14,10 @@ fn main() {
                 println!("Repo: {}", repo.name());
                 for worktree in repo.worktrees() {
                     println!(
-                        "  Worktree: {:?}\n  HEAD: {}\n  Branch: {:?}\n  Main: {}",
-                        worktree.path(),
+                        "  Worktree: {}\n  HEAD: {}\n  Branch: {}\n  Main: {}",
+                        worktree.path().display(),
                         worktree.head(),
-                        worktree.branch(),
+                        worktree.branch().unwrap_or_else(|| "unknown".into()),
                         worktree.is_main()
                     );
                 }
