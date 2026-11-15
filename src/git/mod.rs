@@ -4,7 +4,7 @@ mod workspace;
 mod worktree;
 
 pub use repo::Repo;
-pub use status::Upstream;
+pub use status::{FileEntry, Status};
 use std::path::{Path, PathBuf};
 pub use workspace::Workspace;
 pub use worktree::Worktree;
