@@ -1,8 +1,10 @@
 mod repo;
+mod status;
 mod workspace;
 mod worktree;
 
 pub use repo::Repo;
+pub use status::Upstream;
 use std::path::{Path, PathBuf};
 pub use workspace::Workspace;
 pub use worktree::Worktree;

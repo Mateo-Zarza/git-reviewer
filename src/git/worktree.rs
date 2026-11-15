@@ -1,3 +1,5 @@
+use crate::git::{GitError, status::Status};
+
 use super::Git;
 use std::path::Path;
 
@@ -61,6 +63,13 @@ impl Worktree {
             }
         }
         worktrees
+    }
+
+    pub fn status(&self) -> Result<Status, GitError> {
+        let output = self
+            .git
+            .run(&["status", "--porcelain=2", "--branch", "-z"])?;
+        Ok(Status::parse(&output))
     }
 }
 
