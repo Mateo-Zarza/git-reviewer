@@ -1,10 +1,12 @@
+mod diff;
 mod repo;
 mod status;
 mod workspace;
 mod worktree;
 
+pub use diff::{Diff, DiffLine};
 pub use repo::Repo;
-pub use status::{FileEntry, Status};
+pub use status::{ChangeKind, FileEntry, Status};
 use std::path::{Path, PathBuf};
 pub use workspace::Workspace;
 pub use worktree::Worktree;

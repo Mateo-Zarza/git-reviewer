@@ -1,4 +1,4 @@
-use crate::git::{GitError, status::Status};
+use crate::git::{Diff, GitError, status::Status};
 
 use super::Git;
 use std::path::Path;
@@ -70,6 +70,17 @@ impl Worktree {
             .git
             .run(&["status", "--porcelain=2", "--branch", "-z"])?;
         Ok(Status::parse(&output))
+    }
+
+    pub fn diff(&self, path: &str, staged: bool) -> Result<Diff, GitError> {
+        let args = if staged {
+            vec!["diff", "--cached", "--", path]
+        } else {
+            vec!["diff", "--", path]
+        };
+        let output = self.git.run(&args)?;
+
+        Ok(Diff::parse(&output))
     }
 }
 
