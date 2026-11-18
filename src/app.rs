@@ -3,7 +3,7 @@ use crate::git::{
 };
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Font, Padding,
+    Color, Element, Fill, Font, Padding, Task,
     alignment::{Horizontal::Right, Vertical::Bottom},
     font,
     widget::{button, column, container, row, scrollable, text, text_editor},
@@ -18,6 +18,11 @@ pub enum Message {
     Stage(String),
     Unstage(String),
     CommitMessageEdited(text_editor::Action),
+    Commit,
+    FetchAll,
+    Fetched(Result<(), GitError>),
+    Sync,
+    Synced(Result<(), GitError>),
 }
 
 pub struct App {
@@ -29,6 +34,7 @@ pub struct App {
     diff: Option<Result<Diff, GitError>>,
     error: Option<GitError>,
     commit_message: text_editor::Content,
+    base_counts: Option<(String, (usize, usize))>,
 }
 impl App {
     pub fn new() -> Self {
@@ -44,10 +50,11 @@ impl App {
             diff: None,
             error: None,
             commit_message: text_editor::Content::new(),
+            base_counts: None,
         }
     }
 
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WorktreeSelected(path) => {
                 self.selected_worktree_path = Some(path);
@@ -65,9 +72,7 @@ impl App {
                 self.load_diff();
             }
             Message::Stage(path) => {
-                let worktree = self.selected_worktree();
-
-                if let Some(worktree) = worktree {
+                if let Some(worktree) = self.selected_worktree() {
                     self.error = worktree.stage(&path).err();
                 }
 
@@ -81,9 +86,7 @@ impl App {
                 }
             }
             Message::Unstage(path) => {
-                let worktree = self.selected_worktree();
-
-                if let Some(worktree) = worktree {
+                if let Some(worktree) = self.selected_worktree() {
                     self.error = worktree.unstage(&path).err();
                 }
 
@@ -110,7 +113,49 @@ impl App {
             Message::CommitMessageEdited(action) => {
                 self.commit_message.perform(action);
             }
+            Message::Commit => {
+                if let Some(worktree) = self.selected_worktree() {
+                    match worktree.commit(&self.commit_message.text()) {
+                        Ok(_) => {
+                            self.commit_message = text_editor::Content::new();
+                            self.error = None;
+                        }
+                        Err(err) => {
+                            self.error = Some(err);
+                        }
+                    }
+                    self.load_status();
+                }
+            }
+            Message::FetchAll => {
+                self.error = None;
+                if let Ok(workspace) = &self.workspace {
+                    let tasks =
+                        workspace.repos().iter().cloned().map(|repo| {
+                            Task::perform(async move { repo.fetch() }, Message::Fetched)
+                        });
+                    return Task::batch(tasks);
+                }
+            }
+            Message::Fetched(result) => {
+                if let Err(err) = result {
+                    self.error = Some(err);
+                }
+                self.load_status();
+            }
+            Message::Sync => {
+                self.error = None;
+                if let Some(worktree) = self.selected_worktree().cloned() {
+                    return Task::perform(async move { worktree.sync() }, Message::Synced);
+                }
+            }
+            Message::Synced(result) => {
+                self.error = result.err();
+                self.load_status();
+                self.load_diff();
+            }
         }
+        Task::none()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -125,7 +170,8 @@ impl App {
                 container(status_view(
                     &self.status,
                     &self.commit_message,
-                    self.selected_repo().map(|r| r.name())
+                    self.selected_repo().map(|r| r.name()),
+                    &self.base_counts
                 ))
                 .width(280),
                 scrollable(diff_view(&self.diff)).width(Fill)
@@ -138,13 +184,14 @@ impl App {
         column![
             row![
                 button(text("Refresh")).on_press(Message::Refresh),
+                button(text("Fetch all")).on_press(Message::FetchAll),
                 text(
                     self.error
                         .as_ref()
                         .map(|e| e.to_string())
                         .unwrap_or_default()
                 )
-                .color(Color::from_rgb8(240, 133, 122))
+                .color(Color::from_rgb8(240, 133, 122)),
             ],
             body
         ]
@@ -153,6 +200,20 @@ impl App {
 
     fn load_status(&mut self) {
         self.status = self.selected_worktree().map(|worktree| worktree.status());
+
+        let base = self.selected_repo().and_then(|repo| repo.default_base());
+
+        match (base, self.selected_worktree()) {
+            (Some(base), Some(worktree)) => {
+                self.base_counts = worktree
+                    .ahead_behind(&base)
+                    .ok()
+                    .map(|counts| (base, counts));
+            }
+            _ => {
+                self.base_counts = None;
+            }
+        }
     }
 
     fn load_diff(&mut self) {
@@ -202,6 +263,7 @@ fn status_view<'a>(
     status: &'a Option<Result<Status, GitError>>,
     commit_message: &'a text_editor::Content,
     repo_name: Option<&'a str>,
+    base_counts: &'a Option<(String, (usize, usize))>,
 ) -> Element<'a, Message> {
     match status {
         None => text("Select a worktree").into(),
@@ -215,6 +277,23 @@ fn status_view<'a>(
                 .unwrap_or_default();
             let staged_count = status.files.iter().filter(|f| f.staged.is_some()).count();
             let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
+            let upstream_name = status.upstream.as_ref().map(|u| u.name.as_str());
+            let ahead_behind_text = base_counts
+                .as_ref()
+                .filter(|(base, _)| Some(base.as_str()) != upstream_name)
+                .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"))
+                .unwrap_or_default();
+
+            let counts = status.upstream.as_ref().and_then(|u| u.counts);
+
+            let action_button = match (staged_count, unstaged_count, counts) {
+                (1.., _, _) => button(text("Commit"))
+                    .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
+                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => {
+                    button(text(format!("Sync changes ↑{ahead} ↓{behind}"))).on_press(Message::Sync)
+                }
+                _ => button(text("Commit")),
+            };
 
             column![
                 row![
@@ -231,6 +310,9 @@ fn status_view<'a>(
                 ]
                 .spacing(8)
                 .align_y(Bottom),
+                text(ahead_behind_text)
+                    .size(11)
+                    .color(Color::from_rgb8(139, 142, 151)),
                 text("COMMIT MESSAGE")
                     .size(11)
                     .color(Color::from_rgb8(161, 163, 171)),
@@ -238,6 +320,7 @@ fn status_view<'a>(
                     .placeholder("Message (Ctrl+Enter to commit)")
                     .on_action(Message::CommitMessageEdited)
                     .height(72),
+                action_button.width(Fill),
                 text(format!("STAGED CHANGES · {staged_count}"))
                     .size(11)
                     .color(Color::from_rgb8(161, 163, 171)),
