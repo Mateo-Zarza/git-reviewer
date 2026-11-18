@@ -3,6 +3,7 @@ use crate::git::{Diff, DiffSource, GitError, status::Status};
 use super::Git;
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct Worktree {
     git: Git,
     head: String,
@@ -96,6 +97,44 @@ impl Worktree {
         self.git.run(&["commit", "-m", message])?;
         Ok(())
     }
+
+    pub fn pull(&self) -> Result<(), GitError> {
+        self.git.run(&["pull"])?;
+        Ok(())
+    }
+
+    pub fn push(&self) -> Result<(), GitError> {
+        self.git.run(&["push"])?;
+        Ok(())
+    }
+
+    pub fn sync(&self) -> Result<(), GitError> {
+        self.pull()?;
+        self.push()
+    }
+
+    pub fn ahead_behind(&self, base: &str) -> Result<(usize, usize), GitError> {
+        let output = self.git.run(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("HEAD...{base}"),
+        ])?;
+
+        Worktree::parse_counts(&output).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "Failed to parse ahead/behind counts from output: {output}",
+            ))
+        })
+    }
+
+    fn parse_counts(output: &str) -> Option<(usize, usize)> {
+        let parts: Vec<&str> = output.split_whitespace().collect();
+
+        let ahead = parts.get(0)?.parse::<usize>().ok()?;
+        let behind = parts.get(1)?.parse::<usize>().ok()?;
+        Some((ahead, behind))
+    }
 }
 
 #[cfg(test)]
@@ -176,5 +215,16 @@ mod tests {
         assert_eq!(feature_worktree.head(), "1234567890abcdef");
         assert_eq!(feature_worktree.branch(), Some("feature"));
         assert!(!feature_worktree.is_main());
+    }
+
+    #[test]
+    fn test_parse_counts() {
+        let output = "1\t1\n";
+        let counts = Worktree::parse_counts(output);
+        assert_eq!(counts, Some((1, 1)));
+
+        let output = "";
+        let counts = Worktree::parse_counts(output);
+        assert_eq!(counts, None);
     }
 }

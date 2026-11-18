@@ -7,19 +7,22 @@ mod worktree;
 pub use diff::{Diff, DiffLine, DiffSource};
 pub use repo::Repo;
 pub use status::{ChangeKind, FileEntry, Status};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 pub use workspace::Workspace;
 pub use worktree::Worktree;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GitError {
-    Io(std::io::Error),
+    Io(Arc<std::io::Error>),
     CommandFailed(String),
 }
 
 impl From<std::io::Error> for GitError {
     fn from(value: std::io::Error) -> Self {
-        GitError::Io(value)
+        GitError::Io(Arc::new(value))
     }
 }
 
@@ -32,6 +35,7 @@ impl std::fmt::Display for GitError {
     }
 }
 
+#[derive(Clone)]
 struct Git {
     dir: PathBuf,
 }
