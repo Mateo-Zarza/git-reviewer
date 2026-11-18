@@ -44,6 +44,14 @@ impl Workspace {
             .find(|worktree| worktree.path() == path)
     }
 
+    pub fn find_repo(&self, worktree_path: &Path) -> Option<&Repo> {
+        self.repos.iter().find(|repo| {
+            repo.worktrees()
+                .iter()
+                .any(|worktree| worktree.path() == worktree_path)
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

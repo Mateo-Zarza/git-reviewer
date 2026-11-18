@@ -4,7 +4,7 @@ mod status;
 mod workspace;
 mod worktree;
 
-pub use diff::{Diff, DiffLine};
+pub use diff::{Diff, DiffLine, DiffSource};
 pub use repo::Repo;
 pub use status::{ChangeKind, FileEntry, Status};
 use std::path::{Path, PathBuf};

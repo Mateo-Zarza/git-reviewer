@@ -1,4 +1,4 @@
-use crate::git::{Diff, GitError, status::Status};
+use crate::git::{Diff, DiffSource, GitError, status::Status};
 
 use super::Git;
 use std::path::Path;
@@ -72,15 +72,29 @@ impl Worktree {
         Ok(Status::parse(&output))
     }
 
-    pub fn diff(&self, path: &str, staged: bool) -> Result<Diff, GitError> {
-        let args = if staged {
-            vec!["diff", "--cached", "--", path]
-        } else {
-            vec!["diff", "--", path]
-        };
-        let output = self.git.run(&args)?;
+    pub fn diff(&self, path: &str, source: DiffSource) -> Result<Diff, GitError> {
+        Ok(match source {
+            DiffSource::Staged => Diff::parse(&self.git.run(&["diff", "--cached", "--", path])?),
+            DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", "--", path])?),
+            DiffSource::Untracked => {
+                Diff::from_new_file(&std::fs::read_to_string(self.path().join(path))?)
+            }
+        })
+    }
 
-        Ok(Diff::parse(&output))
+    pub fn stage(&self, path: &str) -> Result<(), GitError> {
+        self.git.run(&["add", "--", path])?;
+        Ok(())
+    }
+
+    pub fn unstage(&self, path: &str) -> Result<(), GitError> {
+        self.git.run(&["restore", "--staged", "--", path])?;
+        Ok(())
+    }
+
+    pub fn commit(&self, message: &str) -> Result<(), GitError> {
+        self.git.run(&["commit", "-m", message])?;
+        Ok(())
     }
 }
 
