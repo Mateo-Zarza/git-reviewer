@@ -1,4 +1,4 @@
-use std::path::{PathBuf, absolute};
+use std::path::{Path, PathBuf, absolute};
 
 use crate::git::{Git, GitError, Worktree};
 
@@ -56,5 +56,23 @@ impl Repo {
             .run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
             .ok()
             .map(|s| s.trim().to_string())
+    }
+
+    pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<(), GitError> {
+        let path = path.to_string_lossy();
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&path);
+        self.git.run(&args)?;
+
+        Ok(())
+    }
+
+    pub fn delete_branch(&self, name: &str) -> Result<(), GitError> {
+        self.git.run(&["branch", "-d", name])?;
+
+        Ok(())
     }
 }

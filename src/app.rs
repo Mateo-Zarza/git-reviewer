@@ -25,6 +25,24 @@ pub enum Message {
     Synced(Result<(), GitError>),
     Publish,
     Published(Result<(), GitError>),
+    RemoveWorktree { force: bool },
+    DeleteBranch { force: bool },
+    ConfirmRemoval(Removal),
+    CancelRemoval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Removal {
+    Worktree,
+    Branch,
+}
+impl Removal {
+    fn message(self, force: bool) -> Message {
+        match self {
+            Removal::Worktree => Message::RemoveWorktree { force },
+            Removal::Branch => Message::DeleteBranch { force },
+        }
+    }
 }
 
 pub struct App {
@@ -37,6 +55,7 @@ pub struct App {
     error: Option<GitError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
+    pending_removal: Option<Removal>,
 }
 impl App {
     pub fn new() -> Self {
@@ -53,12 +72,14 @@ impl App {
             error: None,
             commit_message: text_editor::Content::new(),
             base_counts: None,
+            pending_removal: None,
         }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WorktreeSelected(path) => {
+                self.pending_removal = None;
                 self.selected_worktree_path = Some(path);
                 self.diff = None;
                 self.selected_file = None;
@@ -167,6 +188,57 @@ impl App {
                 self.load_status();
                 self.load_diff();
             }
+            Message::RemoveWorktree { force } => {
+                self.pending_removal = None;
+                if let (Some(repo), Some(path)) =
+                    (self.selected_repo(), &self.selected_worktree_path)
+                {
+                    match repo.remove_worktree(path, force) {
+                        Ok(()) => {
+                            self.error = None;
+                            self.selected_worktree_path = None;
+                            self.selected_file = None;
+                            self.diff = None;
+                        }
+                        Err(err) => {
+                            self.error = Some(err);
+                        }
+                    }
+                }
+                self.workspace = Workspace::scan(&self.root);
+                self.load_status();
+            }
+            Message::DeleteBranch { force } => {
+                self.pending_removal = None;
+                if let (Some(repo), Some(branch), Some(path)) = (
+                    self.selected_repo(),
+                    self.selected_worktree().and_then(|w| w.branch()),
+                    &self.selected_worktree_path,
+                ) {
+                    match repo
+                        .remove_worktree(path, force)
+                        .and_then(|_| repo.delete_branch(branch))
+                    {
+                        Ok(()) => {
+                            self.error = None;
+                        }
+                        Err(err) => {
+                            self.error = Some(err);
+                        }
+                    }
+                    self.selected_worktree_path = None;
+                    self.selected_file = None;
+                    self.diff = None;
+                }
+                self.workspace = Workspace::scan(&self.root);
+                self.load_status();
+            }
+            Message::ConfirmRemoval(removal) => {
+                self.pending_removal = Some(removal);
+            }
+            Message::CancelRemoval => {
+                self.pending_removal = None;
+            }
         }
         Task::none()
     }
@@ -184,7 +256,9 @@ impl App {
                     &self.status,
                     &self.commit_message,
                     self.selected_repo().map(|r| r.name()),
-                    &self.base_counts
+                    &self.base_counts,
+                    self.selected_worktree().is_some_and(|w| w.is_main()),
+                    self.pending_removal,
                 ))
                 .width(280),
                 scrollable(diff_view(&self.diff)).width(Fill)
@@ -277,6 +351,8 @@ fn status_view<'a>(
     commit_message: &'a text_editor::Content,
     repo_name: Option<&'a str>,
     base_counts: &'a Option<(String, (usize, usize))>,
+    is_main_worktree: bool,
+    pending_removal: Option<Removal>,
 ) -> Element<'a, Message> {
     match status {
         None => text("Select a worktree").into(),
@@ -296,7 +372,6 @@ fn status_view<'a>(
                 .filter(|(base, _)| Some(base.as_str()) != upstream_name)
                 .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"))
                 .unwrap_or_default();
-
             let counts = status.upstream.as_ref().and_then(|u| u.counts);
 
             let action_button = match (staged_count, unstaged_count, counts) {
@@ -309,6 +384,39 @@ fn status_view<'a>(
                     button(text("Publish Branch")).on_press(Message::Publish)
                 }
                 _ => button(text("Commit")),
+            };
+
+            let worktree_removable = !is_main_worktree;
+            let branch_deletable = worktree_removable
+                && status.branch.is_some()
+                && base_counts
+                    .as_ref()
+                    .is_none_or(|(_, (ahead, _))| *ahead == 0);
+            let dirty = !status.files.is_empty();
+
+            let request = |removal: Removal| {
+                if dirty {
+                    Message::ConfirmRemoval(removal)
+                } else {
+                    removal.message(false)
+                }
+            };
+
+            let footer = match pending_removal {
+                None => row![
+                    button(text("Rm. worktree"))
+                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree))),
+                    button(text("Del. branch"))
+                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch))),
+                ],
+                Some(removal) => row![
+                    text(format!(
+                        "Discard {} changes and remove?",
+                        status.files.len()
+                    )),
+                    button(text("Remove")).on_press(removal.message(true)),
+                    button(text("Cancel")).on_press(Message::CancelRemoval),
+                ],
             };
 
             column![
@@ -355,6 +463,7 @@ fn status_view<'a>(
                         .iter()
                         .filter_map(|file| file.unstaged.map(|kind| file_view(file, kind, false)))
                 ),
+                footer
             ]
             .into()
         }
