@@ -113,6 +113,11 @@ impl Worktree {
         self.push()
     }
 
+    pub fn publish(&self) -> Result<(), GitError> {
+        self.git.run(&["push", "-u", "origin", "HEAD"])?;
+        Ok(())
+    }
+
     pub fn ahead_behind(&self, base: &str) -> Result<(usize, usize), GitError> {
         let output = self.git.run(&[
             "rev-list",

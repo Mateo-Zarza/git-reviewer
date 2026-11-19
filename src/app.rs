@@ -23,6 +23,8 @@ pub enum Message {
     Fetched(Result<(), GitError>),
     Sync,
     Synced(Result<(), GitError>),
+    Publish,
+    Published(Result<(), GitError>),
 }
 
 pub struct App {
@@ -150,6 +152,17 @@ impl App {
                 }
             }
             Message::Synced(result) => {
+                self.error = result.err();
+                self.load_status();
+                self.load_diff();
+            }
+            Message::Publish => {
+                self.error = None;
+                if let Some(worktree) = self.selected_worktree().cloned() {
+                    return Task::perform(async move { worktree.publish() }, Message::Published);
+                }
+            }
+            Message::Published(result) => {
                 self.error = result.err();
                 self.load_status();
                 self.load_diff();
@@ -291,6 +304,9 @@ fn status_view<'a>(
                     .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
                 (0, 0, Some((ahead, behind))) if ahead + behind > 0 => {
                     button(text(format!("Sync changes ↑{ahead} ↓{behind}"))).on_press(Message::Sync)
+                }
+                (0, 0, None) if status.branch.is_some() => {
+                    button(text("Publish Branch")).on_press(Message::Publish)
                 }
                 _ => button(text("Commit")),
             };
