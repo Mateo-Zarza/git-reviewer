@@ -1,7 +1,9 @@
 //! The middle panel: header, commit box, staged/unstaged file list and the removal footer.
 
+use iced::keyboard::{Key, key::Named};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::Wrapping;
+use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Button, button, column, container, row, rule, scrollable, text, text_editor};
 use iced::{
     Alignment::Center, Color, Element, Fill, Padding, alignment::Vertical::Bottom,
@@ -87,6 +89,7 @@ impl App {
         let staged_count = status.files.iter().filter(|f| f.staged.is_some()).count();
         let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
         let counts = status.upstream.as_ref().and_then(|u| u.counts);
+        let can_commit = staged_count > 0 && !self.commit_message.is_empty();
         let label = |label: &'static str| -> Element<'a, Message> {
             text(label).font(fonts::UI_SEMIBOLD).into()
         };
@@ -95,10 +98,7 @@ impl App {
         // changes, then Sync while ahead/behind the upstream, Publish if there's none.
         let (content, on_press): (Element<'a, Message>, Option<Message>) =
             match (staged_count, unstaged_count, counts) {
-                (1.., _, _) => (
-                    label("Commit"),
-                    (!self.commit_message.is_empty()).then_some(Message::Commit),
-                ),
+                (1.., _, _) => (label("Commit"), can_commit.then_some(Message::Commit)),
                 (0, 0, Some((ahead, behind))) if ahead + behind > 0 => (
                     row![
                         label("Sync changes"),
@@ -125,8 +125,13 @@ impl App {
                     .color(colors::TEXT_MUTED)
                     .font(fonts::UI_SEMIBOLD),
                 text_editor(&self.commit_message)
-                    .placeholder("Message (Ctrl+Enter to commit)")
+                    .placeholder(if cfg!(target_os = "macos") {
+                        "Message (⌘+Enter to commit)"
+                    } else {
+                        "Message (Ctrl+Enter to commit)"
+                    })
                     .on_action(Message::CommitMessageEdited)
+                    .key_binding(move |key_press| commit_shortcut(key_press, can_commit))
                     .padding([8.0, 10.0])
                     .height(72)
                     .style(theme::commit_input),
@@ -284,6 +289,23 @@ impl App {
             .into(),
         }
     }
+}
+
+/// The commit box's key handling: Ctrl+Enter (Cmd+Enter on macOS, which is what
+/// `modifiers.command()` means) commits; every other key behaves as usual.
+/// iced calls this for every key press, focused or not, hence the focus check.
+fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Message>> {
+    let is_shortcut = matches!(key_press.status, text_editor::Status::Focused { .. })
+        && key_press.modifiers.command()
+        && key_press.key == Key::Named(Named::Enter);
+
+    if is_shortcut {
+        // When committing isn't possible yet, swallow the shortcut rather than let it
+        // insert a newline, like VS Code.
+        return can_commit.then_some(Binding::Custom(Message::Commit));
+    }
+
+    Binding::from_key_press(key_press)
 }
 
 /// "STAGED CHANGES · 3" with its stage-all / unstage-all button on the right.
