@@ -57,6 +57,10 @@ pub mod layouts {
     pub const BUTTON_HEIGHT: f32 = 30.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 32.0;
     pub const ICON_BUTTON: f32 = 22.0;
+    /// File rows and section headers in the changes list.
+    pub const LIST_ROW_HEIGHT: f32 = 30.0;
+    /// Catppuccin's file icons are drawn on a 16px grid.
+    pub const FILE_ICON: f32 = 16.0;
     // Diff
     pub const LINE_NUMBER_WIDTH: f32 = 44.0;
     pub const DIFF_LINE_HEIGHT: f32 = 20.0;
@@ -106,6 +110,7 @@ pub mod icons {
     pub const UPLOAD: &[u8] = include_bytes!("../assets/icons/arrow-up-from-line.svg");
     pub const CHECK: &[u8] = include_bytes!("../assets/icons/check.svg");
     pub const SYNC: &[u8] = include_bytes!("../assets/icons/sync.svg");
+    pub const DISCARD: &[u8] = include_bytes!("../assets/icons/discard.svg");
     pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
     pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");

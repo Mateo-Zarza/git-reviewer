@@ -52,6 +52,10 @@ impl Git {
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(self.dir())
+            // Every path we pass is an exact file name from `git status`, never a
+            // pattern. Without this, `restore -- [id].tsx` would also match `i.tsx` and
+            // `d.tsx` (glob), and a name starting with `:` would be read as magic.
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .output()?;
 
         if output.status.success() {

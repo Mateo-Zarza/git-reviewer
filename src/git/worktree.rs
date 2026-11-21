@@ -118,6 +118,34 @@ impl Worktree {
         self.unstage_pathspec(path)
     }
 
+    /// Throws away the unstaged changes of exactly these files, given as
+    /// `(path, is_untracked)`, like VS Code's "Discard Changes":
+    /// - tracked files go back to their staged (or, if nothing is staged, committed)
+    ///   version; staged changes are kept;
+    /// - untracked files are deleted by `git clean`, which also takes a wholly
+    ///   untracked folder (`dir/`) but, unlike a plain delete, spares ignored files
+    ///   inside it (`node_modules`, `.env`) and nested repos or worktrees.
+    ///
+    /// Only the listed paths are touched, never "everything": a file that appeared after
+    /// the user confirmed isn't part of what they agreed to lose.
+    pub fn discard(&self, files: &[(String, bool)]) -> Result<(), GitError> {
+        let (untracked, tracked): (Vec<&(String, bool)>, Vec<&(String, bool)>) =
+            files.iter().partition(|(_, untracked)| *untracked);
+
+        // In batches, to stay well under the OS's command-line length limit.
+        for batch in tracked.chunks(100) {
+            let mut args = vec!["restore", "--"];
+            args.extend(batch.iter().map(|(path, _)| path.as_str()));
+            self.git.run(&args)?;
+        }
+        for batch in untracked.chunks(100) {
+            let mut args = vec!["clean", "-f", "-d", "-q", "--"];
+            args.extend(batch.iter().map(|(path, _)| path.as_str()));
+            self.git.run(&args)?;
+        }
+        Ok(())
+    }
+
     /// Stages everything, untracked files and deletions included (VS Code's "Stage All Changes").
     pub fn stage_all(&self) -> Result<(), GitError> {
         self.git.run(&["add", "-A"])?;

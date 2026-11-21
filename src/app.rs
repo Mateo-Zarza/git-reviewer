@@ -4,6 +4,7 @@
 
 mod changes;
 mod diff;
+mod file_icon;
 mod sidebar;
 mod watch;
 
@@ -15,6 +16,7 @@ use iced::widget::operation;
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::{Container, button, column, container, row, rule, space, text, text_editor};
 use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task, window};
+use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
@@ -37,6 +39,10 @@ pub enum Message {
     RootChosen(Option<PathBuf>),
     /// A frame passed while a Sync/Publish runs; only redraws the spinning icon.
     Tick,
+    /// A discard button was clicked: ask for confirmation first.
+    DiscardRequested(DiscardScope),
+    /// The confirmation dialog closed; `true` if the user said yes.
+    DiscardAnswered(DiscardPlan, bool),
     Stage(String),
     Unstage(String),
     StageAll,
@@ -69,6 +75,24 @@ impl Removal {
     }
 }
 
+/// Which discard button was clicked.
+#[derive(Debug, Clone)]
+pub enum DiscardScope {
+    File { path: String, untracked: bool },
+    /// Every unstaged change in the worktree, untracked files included.
+    All,
+}
+
+/// Exactly what a confirmed discard will do, fixed when the button is clicked. The
+/// dialog doesn't block the app, so nothing is re-read at "Yes" time: switching
+/// worktrees or a file appearing meanwhile can't change what gets thrown away.
+#[derive(Debug, Clone)]
+pub struct DiscardPlan {
+    worktree: PathBuf,
+    /// `(path, is_untracked)`, as listed when the button was clicked.
+    files: Vec<(String, bool)>,
+}
+
 /// A push/pull running in the background, which the primary button shows as busy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RemoteOp {
@@ -81,6 +105,8 @@ pub struct App {
     /// The Sync or Publish in flight and when it started (the spinner's angle comes
     /// from the elapsed time). `None` when idle.
     remote_op: Option<(RemoteOp, Instant)>,
+    /// A discard confirmation is on screen; further discard clicks are ignored.
+    discard_dialog_open: bool,
     selected_worktree_path: Option<PathBuf>,
     selected_file: Option<(String, DiffSource)>,
     status: Option<Result<Status, GitError>>,
@@ -143,6 +169,7 @@ impl App {
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
             remote_op: None,
+            discard_dialog_open: false,
             selected_worktree_path: None,
             selected_file: None,
             status: None,
@@ -158,6 +185,31 @@ impl App {
         };
         app.workspace = app.scan();
         app
+    }
+
+    /// Pins down what a click on a discard button would throw away: the selected
+    /// worktree and the exact unstaged files listed right now. `None` when there's
+    /// nothing to discard (e.g. a stale click after the list changed).
+    fn discard_plan(&self, scope: DiscardScope) -> Option<DiscardPlan> {
+        let worktree = self.selected_worktree_path.clone()?;
+        let files = match scope {
+            DiscardScope::File { path, untracked } => vec![(path, untracked)],
+            DiscardScope::All => {
+                let Some(Ok(status)) = &self.status else {
+                    return None;
+                };
+                status
+                    .files
+                    .iter()
+                    .filter_map(|file| {
+                        let kind = file.unstaged?;
+                        Some((file.path.clone(), kind == ChangeKind::Untracked))
+                    })
+                    .collect()
+            }
+        };
+
+        (!files.is_empty()).then_some(DiscardPlan { worktree, files })
     }
 
     /// Switches to another root folder: remembers it in the config, forgets the old
@@ -340,6 +392,42 @@ impl App {
                 self.error = result.err().map(AppError::from);
                 self.load_status();
                 self.load_diff();
+            }
+            Message::DiscardRequested(scope) => {
+                // One dialog at a time: a second click while one is open does nothing.
+                if self.discard_dialog_open {
+                    return Task::none();
+                }
+                let Some(plan) = self.discard_plan(scope) else {
+                    return Task::none();
+                };
+                // The OS's own dialog: unmissable, and it can't be clicked through by
+                // accident. Yes/No rather than custom labels, which Windows only shows
+                // with extra setup.
+                let dialog = rfd::AsyncMessageDialog::new()
+                    .set_level(MessageLevel::Warning)
+                    .set_title("Discard changes")
+                    .set_description(discard_question(&plan))
+                    .set_buttons(MessageButtons::YesNo);
+
+                self.discard_dialog_open = true;
+                return Task::perform(dialog.show(), move |answer| {
+                    Message::DiscardAnswered(plan, answer == MessageDialogResult::Yes)
+                });
+            }
+            Message::DiscardAnswered(plan, confirmed) => {
+                self.discard_dialog_open = false;
+                // The worktree the plan was made for, looked up by path: not whichever
+                // one happens to be selected now.
+                let worktree = match &self.workspace {
+                    Ok(workspace) if confirmed => workspace.find_worktree(&plan.worktree),
+                    _ => None,
+                };
+                if let Some(worktree) = worktree {
+                    self.error = worktree.discard(&plan.files).err().map(AppError::from);
+                    self.load_status();
+                    self.retarget_selected_file();
+                }
             }
             Message::Sync | Message::Publish => {} // one is already running
             Message::Tick => {}                    // nothing to update; the redraw is the point
@@ -632,6 +720,31 @@ impl App {
         match (&self.selected_worktree_path, &self.workspace) {
             (Some(selected), Ok(workspace)) => workspace.find_repo(selected),
             _ => None,
+        }
+    }
+}
+
+/// The confirmation text, saying exactly what the plan will lose.
+fn discard_question(plan: &DiscardPlan) -> String {
+    const WARNING: &str = "This can't be undone.";
+
+    match plan.files.as_slice() {
+        [(path, true)] if path.ends_with('/') => format!(
+            "Delete the untracked folder {path} and everything in it (except ignored \
+             files)?\n\n{WARNING}"
+        ),
+        [(path, true)] => format!("Delete the untracked file {path}?\n\n{WARNING}"),
+        [(path, false)] => format!("Discard the changes in {path}?\n\n{WARNING}"),
+        files => {
+            let untracked = files.iter().filter(|(_, untracked)| *untracked).count();
+            let count = files.len();
+            match untracked {
+                0 => format!("Discard the changes in {count} files?\n\n{WARNING}"),
+                _ => format!(
+                    "Discard the changes in {count} files? {untracked} of them are \
+                     untracked and will be deleted.\n\n{WARNING}"
+                ),
+            }
         }
     }
 }

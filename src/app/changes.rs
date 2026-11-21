@@ -4,9 +4,12 @@ use iced::keyboard::{Key, key::Named};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::Wrapping;
 use iced::widget::text_editor::{Binding, KeyPress};
-use iced::widget::{Button, button, column, container, row, rule, scrollable, text, text_editor};
+use iced::widget::{
+    Button, Row, button, column, container, hover, row, rule, scrollable, space, text,
+    text_editor,
+};
 use iced::{
-    Alignment::Center, Color, Element, Fill, Padding, alignment::Vertical::Bottom,
+    Alignment::Center, Border, Color, Element, Fill, Padding, alignment::Vertical::Bottom,
 };
 use iced_palace::widget::ellipsized_text;
 
@@ -14,7 +17,8 @@ use std::f32::consts::TAU;
 
 use iced::{Radians, Rotation};
 
-use super::{App, Message, RemoteOp, Removal, empty_state};
+use super::file_icon::file_icon;
+use super::{App, DiscardScope, Message, RemoteOp, Removal, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
@@ -242,28 +246,37 @@ impl App {
             .selected_file
             .as_ref()
             .is_some_and(|(path, selected_source)| *path == file.path && *selected_source == source);
-        let (sign_icon, sign_message) = if staged {
-            (icons::MINUS, Message::Unstage(file.path.clone()))
+        // VS Code's order: discard first, then stage; a staged file can only be unstaged.
+        let actions = if staged {
+            row![icon_button(icons::MINUS, Message::Unstage(file.path.clone()))]
         } else {
-            (icons::PLUS, Message::Stage(file.path.clone()))
+            let discard = DiscardScope::File {
+                path: file.path.clone(),
+                untracked: kind == ChangeKind::Untracked,
+            };
+            row![
+                icon_button(icons::DISCARD, Message::DiscardRequested(discard)),
+                icon_button(icons::PLUS, Message::Stage(file.path.clone())),
+            ]
         };
         let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
 
-        button(
+        let row_button = button(
             row![
                 text(kind.to_code().to_string())
                     .font(fonts::MONO_MEDIUM)
                     .color(kind_color(kind))
                     .width(12),
+                file_icon(&file.path),
                 ellipsized_text(name).wrapping(Wrapping::None),
                 ellipsized_text(dir)
                     .size(text_sizes::SMALL)
                     .color(colors::TEXT_DIM)
                     .wrapping(Wrapping::None)
                     .width(Fill),
-                icon_button(sign_icon, sign_message),
             ]
             .spacing(layouts::GAP)
+            .height(Fill)
             .align_y(Center),
         )
         .on_press(Message::FileSelected {
@@ -271,9 +284,19 @@ impl App {
             source,
         })
         .width(Fill)
-        .padding(Padding::from([4.0, 8.0]).right(4.0))
-        .style(theme::list_row(is_selected))
-        .into()
+        .height(layouts::LIST_ROW_HEIGHT)
+        .padding([0.0, 8.0])
+        .style(theme::list_row(is_selected));
+
+        // While hovered the row is HOVER (or SELECTED, which wins); the actions sit on a
+        // patch of that same color so the name slides under them, like VS Code.
+        let row_color = if is_selected {
+            colors::SELECTED
+        } else {
+            colors::HOVER
+        };
+
+        hover(row_button, hover_actions(actions, row_color))
     }
 
     fn changes_footer<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
@@ -353,32 +376,67 @@ fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Mess
 
 /// "STAGED CHANGES · 3" with its stage-all / unstage-all button on the right.
 fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
-    let (bytes, message) = if staged {
-        (icons::MINUS, Message::UnstageAll)
+    let actions = if staged {
+        row![icon_button(icons::MINUS, Message::UnstageAll)]
     } else {
-        (icons::PLUS, Message::StageAll)
+        row![
+            icon_button(icons::DISCARD, Message::DiscardRequested(DiscardScope::All)),
+            icon_button(icons::PLUS, Message::StageAll),
+        ]
     };
 
-    row![
+    let title = container(
         text(title)
             .size(text_sizes::LABEL)
             .font(fonts::UI_SEMIBOLD)
-            .color(colors::TEXT_MUTED)
-            .width(Fill),
-        icon_button(bytes, message),
+            .color(colors::TEXT_MUTED),
+    )
+    .width(Fill)
+    .height(layouts::LIST_ROW_HEIGHT)
+    .padding([0.0, 8.0])
+    .align_y(Center);
+
+    hover(title, hover_actions(actions, colors::SURFACE))
+}
+
+/// The buttons a row shows only while hovered, right-aligned over the row. They sit on
+/// a patch of `background` (the hovered row's color) so text underneath doesn't show
+/// through; clicks anywhere else fall through to the row itself.
+fn hover_actions<'a>(buttons: Row<'a, Message>, background: Color) -> Element<'a, Message> {
+    row![
+        space().width(Fill),
+        container(buttons.spacing(4))
+            .padding(Padding::ZERO.left(4.0))
+            .style(move |_| container::Style {
+                background: Some(background.into()),
+                border: Border {
+                    radius: theme::radii::CONTROL.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }),
     ]
+    .height(Fill)
     .align_y(Center)
-    .padding(Padding::from(4.0).left(8.0))
+    .padding(Padding::ZERO.right(4.0))
     .into()
 }
 
 /// A 22px square button holding a 13px icon, as in the mockup's file list.
 fn icon_button<'a>(bytes: &'static [u8], message: Message) -> Button<'a, Message> {
-    button(container(icon(bytes, 13.0, colors::TEXT_MUTED)).center(Fill))
+    // Pinned 4px from the top-left rather than centered: centering a 13px icon in 22px
+    // puts it at 4.5px, a half pixel, which smears its thin strokes across two pixel
+    // columns (the + looked dim). Half a pixel off-center isn't visible; blur is.
+    button(icon(bytes, 13.0, colors::TEXT_MUTED))
         .on_press(message)
         .width(layouts::ICON_BUTTON)
         .height(layouts::ICON_BUTTON)
-        .padding(0)
+        .padding(Padding {
+            top: 4.0,
+            left: 4.0,
+            right: 5.0,
+            bottom: 5.0,
+        })
         .style(theme::icon_button)
 }
 
