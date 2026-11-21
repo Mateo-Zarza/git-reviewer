@@ -4,14 +4,17 @@ use crate::git::{
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
 use iced::Padding;
-use iced::widget::text::Wrapping;
-use iced::widget::{rule, space};
+use iced::widget::operation;
+use iced::widget::scrollable::{Direction, RelativeOffset};
+use iced::widget::text::{IntoFragment, Wrapping};
+use iced::widget::{Text, responsive, rule, space};
+use std::borrow::Cow;
 use iced_palace::widget::ellipsized_text;
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Task,
+    Color, Element, Fill, Pixels, Task,
     alignment::{Horizontal::Right, Vertical::Bottom},
-    widget::{button, column, container, row, scrollable, text, text_editor},
+    widget::{Button, Container, button, column, container, row, scrollable, text, text_editor},
 };
 use std::path::Path;
 use std::{env::args, path::PathBuf};
@@ -23,6 +26,8 @@ pub enum Message {
     Refresh,
     Stage(String),
     Unstage(String),
+    StageAll,
+    UnstageAll,
     CommitMessageEdited(text_editor::Action),
     Commit,
     FetchAll,
@@ -94,11 +99,14 @@ impl App {
             Message::Refresh => {
                 self.workspace = Workspace::scan(&self.root);
                 self.load_status();
-                self.load_diff();
+                self.retarget_selected_file();
             }
             Message::FileSelected { path, source } => {
                 self.selected_file = Some((path, source));
                 self.load_diff();
+                // iced keeps a scrollable's offset across content changes, so a newly
+                // opened file would start wherever the previous one was scrolled to.
+                return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
             Message::Stage(path) => {
                 if let Some(worktree) = self.selected_worktree() {
@@ -106,13 +114,7 @@ impl App {
                 }
 
                 self.load_status();
-
-                if let Some((selected_path, source)) = &mut self.selected_file {
-                    if *selected_path == path {
-                        *source = DiffSource::Staged;
-                    }
-                    self.load_diff();
-                }
+                self.retarget_selected_file();
             }
             Message::Unstage(path) => {
                 if let Some(worktree) = self.selected_worktree() {
@@ -120,24 +122,23 @@ impl App {
                 }
 
                 self.load_status();
-
-                if let (Some((selected_path, source)), Some(Ok(status))) =
-                    (self.selected_file.as_mut(), self.status.as_ref())
-                {
-                    if *selected_path == path {
-                        let unstaged_kind = status
-                            .files
-                            .iter()
-                            .find(|file| file.path == path)
-                            .and_then(|file| file.unstaged);
-
-                        match unstaged_kind {
-                            Some(ChangeKind::Untracked) => *source = DiffSource::Untracked,
-                            _ => *source = DiffSource::Unstaged,
-                        }
-                        self.load_diff();
-                    }
+                self.retarget_selected_file();
+            }
+            Message::StageAll => {
+                if let Some(worktree) = self.selected_worktree() {
+                    self.error = worktree.stage_all().err();
                 }
+
+                self.load_status();
+                self.retarget_selected_file();
+            }
+            Message::UnstageAll => {
+                if let Some(worktree) = self.selected_worktree() {
+                    self.error = worktree.unstage_all().err();
+                }
+
+                self.load_status();
+                self.retarget_selected_file();
             }
             Message::CommitMessageEdited(action) => {
                 self.commit_message.perform(action);
@@ -154,6 +155,7 @@ impl App {
                         }
                     }
                     self.load_status();
+                    self.retarget_selected_file();
                 }
             }
             Message::FetchAll => {
@@ -317,25 +319,20 @@ impl App {
                         .spacing(layouts::REPO_GAP),
                     ]
                     .spacing(layouts::REPO_GAP),
-                ))
+                )
+                .direction(Direction::Vertical(theme::thin_scrollbar()))
+                .style(theme::scrollbar))
                 .width(layouts::SIDEBAR_WIDTH)
                 .height(Fill)
                 .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X])
                 .style(|_| container::background(colors::SIDEBAR));
 
-                let changes_panel = container(status_view(
-                    &self.status,
-                    &self.commit_message,
-                    self.selected_repo().map(|r| r.name()),
-                    &self.base_counts,
-                    self.selected_worktree().is_some_and(|w| w.is_main()),
-                    self.pending_removal,
-                ))
+                let changes_panel = container(self.changes_panel())
                 .width(layouts::CHANGES_WIDTH)
                 .height(Fill)
                 .style(|_| container::background(colors::SURFACE));
 
-                let diff_panel = scrollable(diff_view(&self.diff)).width(Fill);
+                let diff_panel = container(self.diff_panel()).width(Fill).height(Fill);
 
                 row![
                     sidebar,
@@ -377,6 +374,47 @@ impl App {
             }
             _ => {
                 self.base_counts = None;
+            }
+        }
+    }
+
+    /// After anything that changes the index (stage, unstage, commit, refresh), keeps the
+    /// selected file on the side it was showing if that side still exists, otherwise
+    /// moves it to its other side, or clears the selection once the file has no changes.
+    /// Deriving this from the new status (instead of from the action) means a failed git
+    /// command leaves the selection alone.
+    fn retarget_selected_file(&mut self) {
+        // No readable status (worktree gone, git failing): nothing to show a diff of.
+        let Some(Ok(status)) = &self.status else {
+            self.selected_file = None;
+            self.diff = None;
+            return;
+        };
+        let Some((path, source)) = &self.selected_file else {
+            return;
+        };
+
+        let entry = status.files.iter().find(|file| file.path == *path);
+        let staged = entry
+            .and_then(|file| file.staged)
+            .map(|_| DiffSource::Staged);
+        let unstaged = entry.and_then(|file| file.unstaged).map(|kind| match kind {
+            ChangeKind::Untracked => DiffSource::Untracked,
+            _ => DiffSource::Unstaged,
+        });
+        let new_source = match source {
+            DiffSource::Staged => staged.or(unstaged),
+            DiffSource::Unstaged | DiffSource::Untracked => unstaged.or(staged),
+        };
+
+        match new_source {
+            Some(new_source) => {
+                self.selected_file = Some((path.clone(), new_source));
+                self.load_diff();
+            }
+            None => {
+                self.selected_file = None;
+                self.diff = None;
             }
         }
     }
@@ -463,16 +501,21 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
             .style(theme::pill)
         });
 
+    // Badges are pushed only when present: a `None` child in `row!` still takes a
+    // spacing gap, which would eat into the label's width.
+    let badges = [main_tag, gone_tag, change_pill]
+        .into_iter()
+        .flatten()
+        .map(Element::from);
+
     button(
         row![
             icon(icons::GIT_BRANCH, 13.0, colors::TEXT_MUTED),
             ellipsized_text(label)
                 .wrapping(Wrapping::None)
                 .width(Fill),
-            main_tag,
-            gone_tag,
-            change_pill,
         ]
+        .extend(badges)
         .spacing(layouts::GAP)
         .align_y(Center),
     )
@@ -483,307 +526,514 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
     .into()
 }
 
-fn status_view<'a>(
-    status: &'a Option<Result<Status, GitError>>,
-    commit_message: &'a text_editor::Content,
-    repo_name: Option<&'a str>,
-    base_counts: &'a Option<(String, (usize, usize))>,
-    is_main_worktree: bool,
-    pending_removal: Option<Removal>,
-) -> Element<'a, Message> {
-    match status {
-        None => text("Select a worktree").into(),
-        Some(Err(err)) => text(err.to_string()).into(),
-        Some(Ok(status)) => {
-            let branch = status.branch.as_deref().unwrap_or("(detached)");
-            let upstream_branch = status
-                .upstream
-                .as_ref()
-                .map(|u| u.name.as_str())
-                .unwrap_or_default();
-            let staged_count = status.files.iter().filter(|f| f.staged.is_some()).count();
-            let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
-            let upstream_name = status.upstream.as_ref().map(|u| u.name.as_str());
-            let ahead_behind_text = base_counts
-                .as_ref()
-                .filter(|(base, _)| Some(base.as_str()) != upstream_name)
-                .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"))
-                .unwrap_or_default();
-            let counts = status.upstream.as_ref().and_then(|u| u.counts);
-            let primary_label = |label: String| {
-                text(label)
-                    .width(Fill)
-                    .height(Fill)
-                    .center()
+impl App {
+    /// The middle panel: header, commit box, file list and the removal footer.
+    fn changes_panel(&self) -> Element<'_, Message> {
+        let status = match &self.status {
+            None => {
+                return empty_state("Select a worktree", colors::TEXT_MUTED)
+                    .center(Fill)
+                    .into();
+            }
+            Some(Err(err)) => {
+                return empty_state(err.to_string(), colors::DANGER)
+                    .center(Fill)
+                    .into();
+            }
+            Some(Ok(status)) => status,
+        };
+
+        column![
+            self.changes_header(status),
+            rule::horizontal(1).style(theme::divider),
+            self.commit_section(status),
+            rule::horizontal(1).style(theme::divider),
+            scrollable(self.file_list(status))
+                .direction(Direction::Vertical(theme::thin_scrollbar()))
+                .style(theme::scrollbar)
+                .height(Fill),
+            rule::horizontal(1).style(theme::divider),
+            container(self.changes_footer(status))
+                .padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]),
+        ]
+        .into()
+    }
+
+    fn changes_header<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let branch = status.branch.as_deref().unwrap_or("(detached)");
+        let upstream = status.upstream.as_ref().map(|u| u.name.as_str());
+        let repo_name = self.selected_repo().map(|repo| repo.name());
+        // Only shown when the base isn't the upstream itself, or it would repeat Sync's ↑↓.
+        let base_line = self
+            .base_counts
+            .as_ref()
+            .filter(|(base, _)| Some(base.as_str()) != upstream)
+            .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"));
+
+        column![
+            row![
+                ellipsized_text(branch)
+                    .size(text_sizes::BRANCH)
                     .font(fonts::UI_SEMIBOLD)
-            };
-            let action_button = match (staged_count, unstaged_count, counts) {
-                (1.., _, _) => button(primary_label("Commit".into()))
-                    .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
-                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => {
-                    button(primary_label(format!("Sync changes ↑{ahead} ↓{behind}")))
-                        .on_press(Message::Sync)
-                }
-                (0, 0, None) if status.branch.is_some() => {
-                    button(primary_label("Publish".into())).on_press(Message::Publish)
-                }
-                (0, 1.., _) => button(primary_label("Commit".into())),
-                _ => button(primary_label("No changes".into())),
-            };
-            let worktree_removable = !is_main_worktree;
-            let branch_deletable = worktree_removable
-                && status.branch.is_some()
-                && base_counts
-                    .as_ref()
-                    .is_none_or(|(_, (ahead, _))| *ahead == 0);
-            let dirty = !status.files.is_empty();
-            let request = |removal: Removal| {
-                if dirty {
-                    Message::ConfirmRemoval(removal)
-                } else {
-                    removal.message(false)
-                }
-            };
-
-            let header: Element<'_, Message> = column![
-                row![
-                    ellipsized_text(branch)
-                        .size(text_sizes::BRANCH)
-                        .font(fonts::UI_SEMIBOLD)
-                        .wrapping(Wrapping::None),
-                    ellipsized_text(repo_name.unwrap_or_default())
-                        .size(text_sizes::BRANCH)
-                        .color(colors::TEXT_MUTED)
-                        .wrapping(Wrapping::None),
-                    ellipsized_text(upstream_branch)
-                        .size(text_sizes::SMALL)
-                        .color(colors::TEXT_DIM)
-                        .wrapping(Wrapping::None),
-                ]
-                .spacing(layouts::GAP)
-                .align_y(Bottom),
-                (!ahead_behind_text.is_empty()).then(|| {
-                    text(ahead_behind_text)
-                        .size(text_sizes::LABEL)
-                        .color(colors::TEXT_DIM)
-                }),
+                    .wrapping(Wrapping::None),
+                ellipsized_text(repo_name.unwrap_or_default())
+                    .size(text_sizes::BRANCH)
+                    .color(colors::TEXT_MUTED)
+                    .wrapping(Wrapping::None),
+                ellipsized_text(upstream.unwrap_or_default())
+                    .size(text_sizes::SMALL)
+                    .color(colors::TEXT_DIM)
+                    .wrapping(Wrapping::None),
             ]
-            .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
-            .into();
+            .spacing(layouts::GAP)
+            .align_y(Bottom),
+            base_line.map(|line| {
+                text(line)
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_DIM)
+            }),
+        ]
+        .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
+        .into()
+    }
 
-            let commit_section: Element<'_, Message> = container(
-                column![
-                    text("COMMIT MESSAGE")
-                        .size(text_sizes::LABEL)
-                        .color(colors::TEXT_MUTED)
-                        .font(fonts::UI_SEMIBOLD),
-                    text_editor(commit_message)
-                        .placeholder("Message (Ctrl+Enter to commit)")
-                        .on_action(Message::CommitMessageEdited)
-                        .height(72),
-                    action_button
-                        .style(theme::primary_button)
-                        .height(layouts::PRIMARY_BUTTON_HEIGHT)
-                        .width(Fill),
-                ]
-                .spacing(layouts::GAP),
-            )
-            .padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X])
-            .into();
+    fn commit_section<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let staged_count = status.files.iter().filter(|f| f.staged.is_some()).count();
+        let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
+        let counts = status.upstream.as_ref().and_then(|u| u.counts);
+        let label = |label: &'static str| -> Element<'a, Message> {
+            text(label).font(fonts::UI_SEMIBOLD).into()
+        };
 
-            let file_list: Element<'_, Message> = container(
-                column![
-                    column![
-                        text(format!("STAGED CHANGES · {staged_count}"))
-                            .size(text_sizes::LABEL)
-                            .color(colors::TEXT_MUTED),
-                        column(status.files.iter().filter_map(|file| {
-                            file.staged.map(|kind| file_view(file, kind, true))
-                        })),
-                    ],
-                    column![
-                        text(format!("CHANGES · {unstaged_count}"))
-                            .size(text_sizes::LABEL)
-                            .color(colors::TEXT_MUTED),
-                        column(status.files.iter().filter_map(|file| {
-                            file.unstaged.map(|kind| file_view(file, kind, false))
-                        })),
+        // What the primary button says and does, VS Code-style: Commit while there are
+        // changes, then Sync while ahead/behind the upstream, Publish if there's none.
+        let (content, on_press): (Element<'a, Message>, Option<Message>) =
+            match (staged_count, unstaged_count, counts) {
+                (1.., _, _) => (
+                    label("Commit"),
+                    (!self.commit_message.is_empty()).then_some(Message::Commit),
+                ),
+                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => (
+                    row![
+                        label("Sync changes"),
+                        text(format!("↑{ahead} ↓{behind}"))
+                            .font(fonts::MONO_MEDIUM)
+                            .size(text_sizes::SMALL),
                     ]
-                ]
-                .spacing(layouts::SECTION_GAP),
-            )
-            .padding(layouts::GAP)
-            .into();
+                    .spacing(10)
+                    .align_y(Center)
+                    .into(),
+                    Some(Message::Sync),
+                ),
+                (0, 0, None) if status.branch.is_some() => (label("Publish"), Some(Message::Publish)),
+                (0, 1.., _) => (label("Commit"), None),
+                _ => (label("No changes"), None),
+            };
 
-            let footer: Element<'_, Message> = match pending_removal {
-                None => row![
-                    button(text("Rm. worktree").width(Fill).height(Fill).center())
-                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
-                        .height(layouts::BUTTON_HEIGHT)
-                        .width(Fill)
-                        .style(theme::danger_button),
-                    button(text("Del. branch").width(Fill).height(Fill).center())
-                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
-                        .height(layouts::BUTTON_HEIGHT)
-                        .width(Fill)
-                        .style(theme::danger_button),
+        container(
+            column![
+                text("COMMIT MESSAGE")
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_MUTED)
+                    .font(fonts::UI_SEMIBOLD),
+                text_editor(&self.commit_message)
+                    .placeholder("Message (Ctrl+Enter to commit)")
+                    .on_action(Message::CommitMessageEdited)
+                    .padding([8.0, 10.0])
+                    .height(72)
+                    .style(theme::commit_input),
+                button(container(content).center(Fill))
+                    .on_press_maybe(on_press)
+                    .height(layouts::PRIMARY_BUTTON_HEIGHT)
+                    .width(Fill)
+                    .style(theme::primary_button),
+            ]
+            .spacing(layouts::GAP),
+        )
+        .padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X])
+        .into()
+    }
+
+    fn file_list<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        if status.files.is_empty() {
+            return empty_state("No changes in this worktree", colors::TEXT_MUTED)
+                .center_x(Fill)
+                .into();
+        }
+
+        // One group per side of the index; like VS Code, an empty group isn't shown.
+        let group = |title: &str, staged: bool| -> Option<Element<'a, Message>> {
+            let rows: Vec<Element<'a, Message>> = status
+                .files
+                .iter()
+                .filter_map(|file| {
+                    let kind = if staged { file.staged } else { file.unstaged }?;
+                    Some(self.file_row(file, kind, staged))
+                })
+                .collect();
+
+            (!rows.is_empty()).then(|| {
+                column![
+                    section_header(format!("{title} · {}", rows.len()), staged),
+                    column(rows).spacing(1),
                 ]
-                .spacing(layouts::GAP)
-                .into(),
-                Some(removal) => column![
-                    text(format!(
-                        "Discard {} changes and remove?",
-                        status.files.len()
-                    ))
+                .into()
+            })
+        };
+
+        // `flatten` drops hidden groups, so a lone group gets no stray SECTION_GAP.
+        let groups = [group("STAGED CHANGES", true), group("CHANGES", false)]
+            .into_iter()
+            .flatten();
+
+        container(column(groups).spacing(layouts::SECTION_GAP))
+        .padding(layouts::GAP)
+        .into()
+    }
+
+    fn file_row<'a>(&'a self, file: &'a FileEntry, kind: ChangeKind, staged: bool) -> Element<'a, Message> {
+        let source = if staged {
+            DiffSource::Staged
+        } else if kind == ChangeKind::Untracked {
+            DiffSource::Untracked
+        } else {
+            DiffSource::Unstaged
+        };
+        let is_selected = self
+            .selected_file
+            .as_ref()
+            .is_some_and(|(path, selected_source)| *path == file.path && *selected_source == source);
+        let (sign_icon, sign_message) = if staged {
+            (icons::MINUS, Message::Unstage(file.path.clone()))
+        } else {
+            (icons::PLUS, Message::Stage(file.path.clone()))
+        };
+        let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
+
+        button(
+            row![
+                text(kind.to_code().to_string())
+                    .font(fonts::MONO_MEDIUM)
+                    .color(kind_color(kind))
+                    .width(12),
+                ellipsized_text(name).wrapping(Wrapping::None),
+                ellipsized_text(dir)
+                    .size(text_sizes::SMALL)
+                    .color(colors::TEXT_DIM)
+                    .wrapping(Wrapping::None)
+                    .width(Fill),
+                icon_button(sign_icon, sign_message),
+            ]
+            .spacing(layouts::GAP)
+            .align_y(Center),
+        )
+        .on_press(Message::FileSelected {
+            path: file.path.clone(),
+            source,
+        })
+        .width(Fill)
+        .padding(Padding::from([4.0, 8.0]).right(4.0))
+        .style(theme::list_row(is_selected))
+        .into()
+    }
+
+    fn changes_footer<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let worktree_removable = !self.selected_worktree().is_some_and(|w| w.is_main());
+        // Deliberate deviation from VS Code: only offer to delete branches with nothing
+        // unmerged into the base (no base known → let `git branch -d` decide).
+        let branch_deletable = worktree_removable
+            && status.branch.is_some()
+            && self
+                .base_counts
+                .as_ref()
+                .is_none_or(|(_, (ahead, _))| *ahead == 0);
+        let dirty = !status.files.is_empty();
+        let request = |removal: Removal| {
+            if dirty {
+                Message::ConfirmRemoval(removal)
+            } else {
+                removal.message(false)
+            }
+        };
+
+        let footer_button = |label: &'static str| {
+            button(text(label).width(Fill).height(Fill).center())
+                .height(layouts::BUTTON_HEIGHT)
+                .width(Fill)
+        };
+
+        match self.pending_removal {
+            None => row![
+                footer_button("Rm. worktree")
+                    .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
+                    .style(theme::danger_button),
+                footer_button("Del. branch")
+                    .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
+                    .style(theme::danger_button),
+            ]
+            .spacing(layouts::GAP)
+            .into(),
+            Some(removal) => column![
+                text(format!("Discard {} changes and remove?", status.files.len()))
                     .width(Fill)
                     .center(),
-                    row![
-                        button(text("Remove").width(Fill).height(Fill).center())
-                            .on_press(removal.message(true))
-                            .style(theme::danger_button)
-                            .height(layouts::BUTTON_HEIGHT)
-                            .width(Fill),
-                        button(text("Cancel").width(Fill).height(Fill).center())
-                            .on_press(Message::CancelRemoval)
-                            .style(theme::outline_button)
-                            .height(layouts::BUTTON_HEIGHT)
-                            .width(Fill),
-                    ]
-                    .spacing(layouts::GAP)
+                row![
+                    footer_button("Remove")
+                        .on_press(removal.message(true))
+                        .style(theme::danger_button),
+                    footer_button("Cancel")
+                        .on_press(Message::CancelRemoval)
+                        .style(theme::outline_button),
                 ]
-                .spacing(layouts::GAP)
-                .into(),
-            };
-
-            column![
-                header,
-                rule::horizontal(1).style(theme::divider),
-                commit_section,
-                rule::horizontal(1).style(theme::divider),
-                scrollable(file_list).height(Fill),
-                rule::horizontal(1).style(theme::divider),
-                container(footer).padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X])
+                .spacing(layouts::GAP),
             ]
-            .into()
+            .spacing(layouts::GAP)
+            .into(),
         }
     }
 }
 
-fn file_view(file: &FileEntry, kind: ChangeKind, staged: bool) -> Element<'_, Message> {
-    let source = if staged {
-        DiffSource::Staged
-    } else if kind == ChangeKind::Untracked {
-        DiffSource::Untracked
-    } else {
-        DiffSource::Unstaged
-    };
+/// A centered, muted message for panels with nothing to show.
+fn empty_state<'a>(message: impl Into<String>, color: Color) -> Container<'a, Message> {
+    container(text(message.into()).color(color).center()).padding([24.0, 8.0])
+}
 
-    let button_sign = if staged {
-        button(text("-")).on_press(Message::Unstage(file.path.clone()))
+/// "STAGED CHANGES · 3" with its stage-all / unstage-all button on the right.
+fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
+    let (bytes, message) = if staged {
+        (icons::MINUS, Message::UnstageAll)
     } else {
-        button(text("+")).on_press(Message::Stage(file.path.clone()))
+        (icons::PLUS, Message::StageAll)
     };
-
-    let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
 
     row![
-        button(
-            row![
-                row![
-                    container(
-                        text(kind.to_code().to_string())
-                            .font(fonts::MONO_MEDIUM)
-                            .color(kind_color(kind))
-                            .width(12)
-                    ),
-                    text(name),
-                    text(dir).size(text_sizes::SMALL).color(colors::TEXT_DIM)
-                ]
-                .width(Fill)
-                .spacing(8)
-                .align_y(Center),
-                button_sign.width(layouts::GAP).style(button::text)
-            ]
-            .align_y(Center)
-        )
-        .style(button::text)
-        .on_press(Message::FileSelected {
-            path: file.path.clone(),
-            source,
-        }),
+        text(title)
+            .size(text_sizes::LABEL)
+            .font(fonts::UI_SEMIBOLD)
+            .color(colors::TEXT_MUTED)
+            .width(Fill),
+        icon_button(bytes, message),
     ]
+    .align_y(Center)
+    .padding(Padding::from(4.0).left(8.0))
     .into()
 }
 
-fn diff_view(diff: &Option<Result<Diff, GitError>>) -> Element<'_, Message> {
-    match diff {
-        None => text("Select a file").into(),
-        Some(Err(err)) => text(err.to_string()).into(),
-        Some(Ok(diff)) => column(diff.lines.iter().map(diff_line_view)).into(),
+/// A 22px square button holding a 13px icon, as in the mockup's file list.
+fn icon_button<'a>(bytes: &'static [u8], message: Message) -> Button<'a, Message> {
+    button(container(icon(bytes, 13.0, colors::TEXT_MUTED)).center(Fill))
+        .on_press(message)
+        .width(layouts::ICON_BUTTON)
+        .height(layouts::ICON_BUTTON)
+        .padding(0)
+        .style(theme::icon_button)
+}
+
+// Diff geometry, from the mockup: two 44px line-number columns padded 8 and 10 on the
+// right, a 16px sign column, 24px after the code; hunk headers are padded 16 each side.
+const OLD_NUMBER_PADDING: f32 = 8.0;
+const NEW_NUMBER_PADDING: f32 = 10.0;
+const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
+    + OLD_NUMBER_PADDING
+    + NEW_NUMBER_PADDING
+    + layouts::DIFF_SIGN_WIDTH;
+const CODE_PADDING_RIGHT: f32 = 24.0;
+const HUNK_PADDING_X: f32 = 16.0;
+/// Lets `update` reset the diff's scroll position when another file is opened.
+const DIFF_SCROLLABLE: &str = "diff";
+
+impl App {
+    /// The right panel: a header bar (path, which side, +N −N) over the scrollable diff.
+    fn diff_panel(&self) -> Element<'_, Message> {
+        let (Some((path, source)), Some(diff)) = (&self.selected_file, &self.diff) else {
+            let clean = matches!(&self.status, Some(Ok(status)) if status.files.is_empty());
+            return match (&self.status, clean) {
+                (None, _) => space().into(),
+                (Some(_), true) => empty_state(
+                    "Nothing to review. Everything is committed.",
+                    colors::TEXT_MUTED,
+                )
+                .center(Fill)
+                .into(),
+                (Some(_), false) => {
+                    empty_state("Select a file to see its changes", colors::TEXT_MUTED)
+                        .center(Fill)
+                        .into()
+                }
+            };
+        };
+
+        let diff = match diff {
+            Ok(diff) => diff,
+            Err(err) => {
+                return empty_state(err.to_string(), colors::DANGER)
+                    .center(Fill)
+                    .into();
+            }
+        };
+
+        column![
+            diff_header(path, *source, diff),
+            rule::horizontal(1).style(theme::divider),
+            diff_body(diff),
+        ]
+        .into()
     }
 }
 
-fn diff_line_view(line: &DiffLine) -> Element<'_, Message> {
-    let (content, bg, fg, old, new, sign, sg) = match line {
-        DiffLine::Hunk(text) => (
-            text.as_str(),
-            colors::HUNK_BG,
-            Some(colors::HUNK_TEXT),
-            None,
-            None,
-            " ",
-            None,
-        ),
-        DiffLine::Added { new, text } => (
-            text.as_str(),
-            colors::ADDED_TINT,
-            None,
-            None,
-            Some(*new),
-            "+",
-            Some(colors::ADDED),
-        ),
-        DiffLine::Removed { old, text } => (
-            text.as_str(),
-            colors::REMOVED_TINT,
-            None,
-            Some(*old),
-            None,
-            "-",
-            Some(colors::DELETED),
-        ),
-        DiffLine::Context { old, new, text } => (
-            text.as_str(),
-            Color::TRANSPARENT,
-            None,
-            Some(*old),
-            Some(*new),
-            " ",
-            None,
-        ),
+fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a, Message> {
+    let (added, removed) = diff.counts();
+    let side = match source {
+        DiffSource::Staged => "Staged",
+        DiffSource::Unstaged => "Unstaged",
+        DiffSource::Untracked => "Untracked",
     };
-
-    let old_label = old.map(|n| n.to_string()).unwrap_or_default();
-    let new_label = new.map(|n| n.to_string()).unwrap_or_default();
 
     container(
         row![
-            text(old_label)
-                .width(layouts::LINE_NUMBER_WIDTH)
+            ellipsized_text(path)
                 .font(fonts::MONO)
-                .align_x(Right),
-            text(new_label)
-                .width(layouts::LINE_NUMBER_WIDTH)
+                .size(text_sizes::SMALL)
+                .wrapping(Wrapping::None),
+            container(text(side).size(text_sizes::LABEL))
+                .padding([1.0, 6.0])
+                .style(theme::filled_tag),
+            space().width(Fill),
+            text(format!("+{added}"))
                 .font(fonts::MONO)
-                .align_x(Right),
-            text(sign).font(fonts::MONO).color_maybe(sg),
-            text(content).font(fonts::MONO).color_maybe(fg)
+                .size(text_sizes::SMALL)
+                .color(colors::ADDED),
+            text(format!("−{removed}"))
+                .font(fonts::MONO)
+                .size(text_sizes::SMALL)
+                .color(colors::DANGER),
         ]
-        .spacing(8),
+        .spacing(10)
+        .align_y(Center),
     )
-    .width(Fill)
-    .style(move |_theme| container::background(bg))
+    .height(layouts::DIFF_HEADER_HEIGHT)
+    .padding([0.0, layouts::PANEL_PADDING_X])
+    .align_y(Center)
     .into()
+}
+
+/// The diff lines, scrollable both ways. Lines don't wrap, so every row is given the same
+/// width: the longest line's, or the panel's if that's wider, so the tints run edge to
+/// edge. (Rows can't just be `Fill`: inside a both-ways scrollable that lays out empty.)
+fn diff_body(diff: &Diff) -> Element<'_, Message> {
+    let content_width = diff
+        .lines
+        .iter()
+        .map(|line| {
+            let chars = expand_tabs(line.text()).chars().count() as f32;
+            let code = chars * layouts::DIFF_CHAR_WIDTH;
+            match line {
+                DiffLine::Hunk(_) => code + HUNK_PADDING_X * 2.0,
+                _ => GUTTER_WIDTH + code + CODE_PADDING_RIGHT,
+            }
+        })
+        .fold(0.0, f32::max);
+
+    responsive(move |size| {
+        let width = content_width.max(size.width);
+
+        scrollable(
+            column(diff.lines.iter().map(|line| diff_line_view(line, width))).padding([8.0, 0.0]),
+        )
+        .id(DIFF_SCROLLABLE)
+        .direction(Direction::Both {
+            vertical: theme::thin_scrollbar(),
+            horizontal: theme::thin_scrollbar(),
+        })
+        .style(theme::scrollbar)
+        .width(Fill)
+        .height(Fill)
+        .into()
+    })
+    .into()
+}
+
+fn diff_line_view(line: &DiffLine, width: f32) -> Element<'_, Message> {
+    let (old, new, sign, gutter_bg, line_bg, sign_color) = match line {
+        DiffLine::Hunk(header) => {
+            return container(
+                container(mono(expand_tabs(header)).color(colors::HUNK_TEXT))
+                    .padding([2.0, HUNK_PADDING_X])
+                    .width(width)
+                    .style(|_| container::background(colors::HUNK_BG)),
+            )
+            .padding(Padding::ZERO.top(6.0).bottom(2.0))
+            .into();
+        }
+        DiffLine::Context { old, new, .. } => (
+            Some(*old),
+            Some(*new),
+            " ",
+            colors::BACKGROUND,
+            Color::TRANSPARENT,
+            colors::LINE_NUMBER,
+        ),
+        DiffLine::Added { new, .. } => (
+            None,
+            Some(*new),
+            "+",
+            colors::ADDED_GUTTER,
+            colors::ADDED_TINT,
+            colors::ADDED,
+        ),
+        DiffLine::Removed { old, .. } => (
+            Some(*old),
+            None,
+            "−",
+            colors::REMOVED_GUTTER,
+            colors::REMOVED_TINT,
+            colors::DELETED,
+        ),
+    };
+
+    let number = |number: Option<usize>, padding_right: f32| {
+        container(
+            mono(number.map(|n| n.to_string()).unwrap_or_default())
+                .color(colors::LINE_NUMBER)
+                .width(layouts::LINE_NUMBER_WIDTH)
+                .align_x(Right),
+        )
+        .padding(Padding::ZERO.right(padding_right))
+    };
+
+    container(row![
+        container(row![
+            number(old, OLD_NUMBER_PADDING),
+            number(new, NEW_NUMBER_PADDING),
+            mono(sign)
+                .color(sign_color)
+                .width(layouts::DIFF_SIGN_WIDTH),
+        ])
+        .style(move |_| container::background(gutter_bg)),
+        mono(expand_tabs(line.text())),
+    ])
+    .width(width)
+    .style(move |_| container::background(line_bg))
+    .into()
+}
+
+/// Diff text: JetBrains Mono 12 on a fixed 20px line, never wrapped.
+fn mono<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
+    text(content)
+        .font(fonts::MONO)
+        .size(text_sizes::SMALL)
+        .line_height(Pixels(layouts::DIFF_LINE_HEIGHT))
+        .wrapping(Wrapping::None)
+}
+
+/// Tabs as 4 spaces (VS Code's default), so they render predictably and the width math
+/// above (one glyph = one column) holds.
+fn expand_tabs(line: &str) -> Cow<'_, str> {
+    if line.contains('\t') {
+        Cow::Owned(line.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(line)
+    }
 }
 
 fn kind_color(kind: ChangeKind) -> Color {

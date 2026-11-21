@@ -115,7 +115,36 @@ impl Worktree {
     }
 
     pub fn unstage(&self, path: &str) -> Result<(), GitError> {
-        self.git.run(&["restore", "--staged", "--", path])?;
+        self.unstage_pathspec(path)
+    }
+
+    /// Stages everything, untracked files and deletions included (VS Code's "Stage All Changes").
+    pub fn stage_all(&self) -> Result<(), GitError> {
+        self.git.run(&["add", "-A"])?;
+        Ok(())
+    }
+
+    pub fn unstage_all(&self) -> Result<(), GitError> {
+        self.unstage_pathspec(".")
+    }
+
+    /// `git restore --staged` needs HEAD to restore from, so in a repo with no commits
+    /// yet it fails; there, unstaging means dropping the paths from the index.
+    /// `-f` is needed for files edited after staging (git refuses otherwise); with
+    /// `--cached` it never touches the working tree, it only drops the staged copy —
+    /// the same thing `restore --staged` does when there is a HEAD.
+    fn unstage_pathspec(&self, pathspec: &str) -> Result<(), GitError> {
+        let has_head = self
+            .git
+            .run(&["rev-parse", "--verify", "--quiet", "HEAD"])
+            .is_ok();
+
+        if has_head {
+            self.git.run(&["restore", "--staged", "--", pathspec])?;
+        } else {
+            self.git
+                .run(&["rm", "--cached", "-r", "-f", "--quiet", "--", pathspec])?;
+        }
         Ok(())
     }
 

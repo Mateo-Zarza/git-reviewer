@@ -1,7 +1,7 @@
 use iced::{
     Border, Color, Theme,
     theme::Palette,
-    widget::{button, container, rule},
+    widget::{button, container, rule, scrollable, text_editor},
 };
 
 pub mod colors {
@@ -59,6 +59,11 @@ pub mod layouts {
     // Diff
     pub const LINE_NUMBER_WIDTH: f32 = 44.0;
     pub const DIFF_LINE_HEIGHT: f32 = 20.0;
+    pub const DIFF_SIGN_WIDTH: f32 = 16.0;
+    /// Advance width of one JetBrains Mono glyph (0.6em) at the diff's 12px. Every glyph
+    /// in a monospace font has it, so a line's width is `chars × this`.
+    pub const DIFF_CHAR_WIDTH: f32 = 7.2;
+    pub const DIFF_HEADER_HEIGHT: f32 = 44.0;
     // Padding
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
@@ -226,6 +231,106 @@ pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
             color: border,
             width: 1.0,
             radius: radii::TAG.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The small square +/− buttons in the file list. Hover uses PILL rather than HOVER
+/// because they sit on rows that already turn HOVER when the mouse is over them.
+pub fn icon_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let base = button::Style {
+        background: None,
+        text_color: colors::TEXT_MUTED,
+        border: Border {
+            radius: radii::TAG.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    };
+
+    match status {
+        button::Status::Active => base,
+        button::Status::Hovered | button::Status::Pressed => base.with_background(colors::PILL),
+        button::Status::Disabled => dimmed(base),
+    }
+}
+
+pub fn commit_input(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let border_color = match status {
+        text_editor::Status::Focused { .. } => colors::FOCUS,
+        _ => colors::CONTROL_BORDER,
+    };
+
+    text_editor::Style {
+        background: colors::BACKGROUND.into(),
+        border: Border {
+            color: border_color,
+            width: 1.0,
+            radius: radii::CONTROL.into(),
+        },
+        placeholder: colors::TEXT_DIM,
+        value: colors::TEXT,
+        selection: colors::PRIMARY.scale_alpha(0.4),
+    }
+}
+
+/// The mockup's 10px scrollbar with a 2px inset: a 6px thumb, 2px from the edge.
+pub fn thin_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(6)
+        .scroller_width(6)
+        .margin(2)
+}
+
+/// Every scrollbar in the app: no track, a PILL-grey thumb that lightens on hover/drag.
+pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let rail = |active: bool| scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: if active {
+                colors::SCROLLBAR_HOVER.into()
+            } else {
+                colors::PILL.into()
+            },
+            border: Border {
+                radius: 3.0.into(),
+                ..Border::default()
+            },
+        },
+    };
+
+    let (horizontal_active, vertical_active) = match status {
+        scrollable::Status::Active { .. } => (false, false),
+        scrollable::Status::Hovered {
+            is_horizontal_scrollbar_hovered,
+            is_vertical_scrollbar_hovered,
+            ..
+        } => (is_horizontal_scrollbar_hovered, is_vertical_scrollbar_hovered),
+        scrollable::Status::Dragged {
+            is_horizontal_scrollbar_dragged,
+            is_vertical_scrollbar_dragged,
+            ..
+        } => (is_horizontal_scrollbar_dragged, is_vertical_scrollbar_dragged),
+    };
+
+    scrollable::Style {
+        vertical_rail: rail(vertical_active),
+        horizontal_rail: rail(horizontal_active),
+        gap: None,
+        ..scrollable::default(theme, status)
+    }
+}
+
+/// A filled, square-ish label like the diff header's "Unstaged".
+pub fn filled_tag(_theme: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(colors::TEXT),
+        background: Some(colors::PILL.into()),
+        border: Border {
+            radius: radii::TAG.into(),
+            ..Border::default()
         },
         ..container::Style::default()
     }

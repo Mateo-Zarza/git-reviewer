@@ -16,6 +16,18 @@ pub enum DiffLine {
     },
 }
 
+impl DiffLine {
+    /// The line's content, without the +/-/space prefix (the whole header for hunks).
+    pub fn text(&self) -> &str {
+        match self {
+            DiffLine::Hunk(text)
+            | DiffLine::Context { text, .. }
+            | DiffLine::Added { text, .. }
+            | DiffLine::Removed { text, .. } => text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiffSource {
     Staged,
@@ -28,6 +40,17 @@ pub struct Diff {
     pub lines: Vec<DiffLine>,
 }
 impl Diff {
+    /// (added, removed) line counts, for the diff header's +N −N.
+    pub fn counts(&self) -> (usize, usize) {
+        self.lines
+            .iter()
+            .fold((0, 0), |(added, removed), line| match line {
+                DiffLine::Added { .. } => (added + 1, removed),
+                DiffLine::Removed { .. } => (added, removed + 1),
+                _ => (added, removed),
+            })
+    }
+
     pub(super) fn from_new_file(content: &str) -> Diff {
         let mut lines: Vec<DiffLine> = content
             .lines()
@@ -149,6 +172,8 @@ index 7ae3a89..2b51d74 100644
                 },
             ]
         );
+        assert_eq!(diff.counts(), (1, 1));
+        assert_eq!(diff.lines[2].text(), "            Ok(workspace) => column![");
     }
 
     #[test]
@@ -192,5 +217,6 @@ index 7ae3a89..2b51d74 100644
                 },
             ]
         );
+        assert_eq!(diff.counts(), (3, 0));
     }
 }
