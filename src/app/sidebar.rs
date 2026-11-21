@@ -78,9 +78,13 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
     let is_selected = selected == Some(worktree.path());
     let status = worktree.cached_status();
     let tag = |label: &'static str, border: Color, color: Color| {
-        container(text(label).size(text_sizes::TAG))
-            .padding([1.0, 5.0])
-            .style(theme::tag(border, color))
+        container(
+            text(label)
+                .size(text_sizes::TAG)
+                .line_height(layouts::TAG_LINE_HEIGHT),
+        )
+        .padding(layouts::TAG_PADDING)
+        .style(theme::tag(border, color))
     };
 
     let main_tag = worktree
@@ -96,9 +100,10 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
             container(
                 text(count.to_string())
                     .size(text_sizes::LABEL)
-                    .font(fonts::UI_SEMIBOLD),
+                    .font(fonts::UI_SEMIBOLD)
+                    .line_height(layouts::PILL_LINE_HEIGHT),
             )
-            .padding([1.0, 6.0])
+            .padding(layouts::PILL_PADDING)
             .style(theme::pill)
         });
 

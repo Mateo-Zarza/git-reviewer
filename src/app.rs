@@ -55,24 +55,32 @@ pub enum Message {
     Synced(Result<(), GitError>),
     Publish,
     Published(Result<(), GitError>),
-    RemoveWorktree { force: bool },
-    DeleteBranch { force: bool },
-    ConfirmRemoval(Removal),
-    CancelRemoval,
+    /// A footer button (remove worktree / delete branch) was clicked.
+    RemovalRequested(Removal),
+    /// The confirmation for a worktree with uncommitted changes closed; `true` if yes.
+    RemovalAnswered(RemovalPlan, bool),
 }
 
+/// Which footer button was clicked.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Removal {
     Worktree,
+    /// Remove the worktree, then delete its branch.
     Branch,
 }
-impl Removal {
-    fn message(self, force: bool) -> Message {
-        match self {
-            Removal::Worktree => Message::RemoveWorktree { force },
-            Removal::Branch => Message::DeleteBranch { force },
-        }
-    }
+
+/// What a removal will act on, fixed when the button is clicked, like `DiscardPlan`:
+/// the dialog doesn't block the app, so another worktree may be selected by "Yes" time.
+#[derive(Debug, Clone)]
+pub struct RemovalPlan {
+    removal: Removal,
+    worktree: PathBuf,
+    /// The branch checked out there; `None` when detached.
+    branch: Option<String>,
+    /// What the dialog calls the worktree: its branch, or its short commit if detached.
+    name: String,
+    /// Uncommitted changes when clicked. Any at all means asking first, then forcing git.
+    changes: usize,
 }
 
 /// Which discard button was clicked.
@@ -105,8 +113,9 @@ pub struct App {
     /// The Sync or Publish in flight and when it started (the spinner's angle comes
     /// from the elapsed time). `None` when idle.
     remote_op: Option<(RemoteOp, Instant)>,
-    /// A discard confirmation is on screen; further discard clicks are ignored.
-    discard_dialog_open: bool,
+    /// A confirmation (discard or removal) is on screen; clicks that would open another
+    /// are ignored.
+    dialog_open: bool,
     selected_worktree_path: Option<PathBuf>,
     selected_file: Option<(String, DiffSource)>,
     status: Option<Result<Status, GitError>>,
@@ -123,7 +132,6 @@ pub struct App {
     /// Set when the selected repo's base from the config doesn't resolve. Kept apart
     /// from `error` so it neither hides nor gets hidden by git errors.
     base_error: Option<String>,
-    pending_removal: Option<Removal>,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
@@ -169,7 +177,7 @@ impl App {
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
             remote_op: None,
-            discard_dialog_open: false,
+            dialog_open: false,
             selected_worktree_path: None,
             selected_file: None,
             status: None,
@@ -181,7 +189,6 @@ impl App {
             commit_message: text_editor::Content::new(),
             base_counts: None,
             base_error: None,
-            pending_removal: None,
         };
         app.workspace = app.scan();
         app
@@ -212,6 +219,59 @@ impl App {
         (!files.is_empty()).then_some(DiscardPlan { worktree, files })
     }
 
+    /// Pins down what a click on a footer button would remove: the selected worktree,
+    /// its branch, and how many uncommitted changes it has right now.
+    fn removal_plan(&self, removal: Removal) -> Option<RemovalPlan> {
+        let worktree = self.selected_worktree()?;
+        let Some(Ok(status)) = &self.status else {
+            return None;
+        };
+        let branch = worktree.branch().map(String::from);
+        if removal == Removal::Branch && branch.is_none() {
+            return None;
+        }
+
+        Some(RemovalPlan {
+            removal,
+            worktree: worktree.path().to_path_buf(),
+            name: branch
+                .clone()
+                .unwrap_or_else(|| worktree.head()[..7].to_string()),
+            branch,
+            changes: status.files.len(),
+        })
+    }
+
+    /// Carries out a removal on the worktree it was planned for (found by path, not
+    /// whichever is selected now), then rescans. `force` lets git throw away the
+    /// worktree's uncommitted changes; the branch is still deleted with `-d`, which
+    /// refuses to lose commits.
+    fn remove(&mut self, plan: &RemovalPlan, force: bool) {
+        let repo = match &self.workspace {
+            Ok(workspace) => workspace.find_repo(&plan.worktree),
+            Err(_) => None,
+        };
+        let Some(repo) = repo else {
+            return;
+        };
+
+        let result = repo
+            .remove_worktree(&plan.worktree, force)
+            .and_then(|()| match (plan.removal, &plan.branch) {
+                (Removal::Branch, Some(branch)) => repo.delete_branch(branch),
+                _ => Ok(()),
+            });
+        self.error = result.err().map(AppError::from);
+
+        self.workspace = self.scan();
+        // If the selected worktree was the one removed, there's nothing left to show.
+        if self.selected_worktree().is_none() {
+            self.selected_worktree_path = None;
+        }
+        self.load_status();
+        self.retarget_selected_file();
+    }
+
     /// Switches to another root folder: remembers it in the config, forgets the old
     /// selection, and rescans. The watcher follows on its own, since the worktree list
     /// it's keyed on changes.
@@ -228,7 +288,6 @@ impl App {
         self.selected_worktree_path = None;
         self.selected_file = None;
         self.diff = None;
-        self.pending_removal = None;
         self.workspace = self.scan();
         self.load_status();
     }
@@ -251,7 +310,6 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WorktreeSelected(path) => {
-                self.pending_removal = None;
                 self.selected_worktree_path = Some(path);
                 self.diff = None;
                 self.selected_file = None;
@@ -395,7 +453,7 @@ impl App {
             }
             Message::DiscardRequested(scope) => {
                 // One dialog at a time: a second click while one is open does nothing.
-                if self.discard_dialog_open {
+                if self.dialog_open {
                     return Task::none();
                 }
                 let Some(plan) = self.discard_plan(scope) else {
@@ -410,13 +468,13 @@ impl App {
                     .set_description(discard_question(&plan))
                     .set_buttons(MessageButtons::YesNo);
 
-                self.discard_dialog_open = true;
+                self.dialog_open = true;
                 return Task::perform(dialog.show(), move |answer| {
                     Message::DiscardAnswered(plan, answer == MessageDialogResult::Yes)
                 });
             }
             Message::DiscardAnswered(plan, confirmed) => {
-                self.discard_dialog_open = false;
+                self.dialog_open = false;
                 // The worktree the plan was made for, looked up by path: not whichever
                 // one happens to be selected now.
                 let worktree = match &self.workspace {
@@ -431,56 +489,38 @@ impl App {
             }
             Message::Sync | Message::Publish => {} // one is already running
             Message::Tick => {}                    // nothing to update; the redraw is the point
-            Message::RemoveWorktree { force } => {
-                self.pending_removal = None;
-                if let (Some(repo), Some(path)) =
-                    (self.selected_repo(), &self.selected_worktree_path)
-                {
-                    match repo.remove_worktree(path, force) {
-                        Ok(()) => {
-                            self.error = None;
-                            self.selected_worktree_path = None;
-                            self.selected_file = None;
-                            self.diff = None;
-                        }
-                        Err(err) => {
-                            self.error = Some(err.into());
-                        }
-                    }
+            Message::RemovalRequested(removal) => {
+                if self.dialog_open {
+                    return Task::none();
                 }
-                self.workspace = self.scan();
-                self.load_status();
-            }
-            Message::DeleteBranch { force } => {
-                self.pending_removal = None;
-                if let (Some(repo), Some(branch), Some(path)) = (
-                    self.selected_repo(),
-                    self.selected_worktree().and_then(|w| w.branch()),
-                    &self.selected_worktree_path,
-                ) {
-                    match repo
-                        .remove_worktree(path, force)
-                        .and_then(|_| repo.delete_branch(branch))
-                    {
-                        Ok(()) => {
-                            self.error = None;
-                        }
-                        Err(err) => {
-                            self.error = Some(err.into());
-                        }
-                    }
-                    self.selected_worktree_path = None;
-                    self.selected_file = None;
-                    self.diff = None;
+                let Some(plan) = self.removal_plan(removal) else {
+                    return Task::none();
+                };
+                // Nothing uncommitted means nothing to lose: no question asked.
+                if plan.changes == 0 {
+                    self.remove(&plan, false);
+                    return Task::none();
                 }
-                self.workspace = self.scan();
-                self.load_status();
+                // The same OS dialog as discarding (see `DiscardRequested`).
+                let dialog = rfd::AsyncMessageDialog::new()
+                    .set_level(MessageLevel::Warning)
+                    .set_title(match removal {
+                        Removal::Worktree => "Remove worktree",
+                        Removal::Branch => "Delete branch",
+                    })
+                    .set_description(removal_question(&plan))
+                    .set_buttons(MessageButtons::YesNo);
+
+                self.dialog_open = true;
+                return Task::perform(dialog.show(), move |answer| {
+                    Message::RemovalAnswered(plan, answer == MessageDialogResult::Yes)
+                });
             }
-            Message::ConfirmRemoval(removal) => {
-                self.pending_removal = Some(removal);
-            }
-            Message::CancelRemoval => {
-                self.pending_removal = None;
+            Message::RemovalAnswered(plan, confirmed) => {
+                self.dialog_open = false;
+                if confirmed {
+                    self.remove(&plan, true);
+                }
             }
         }
         Task::none()
@@ -725,10 +765,24 @@ impl App {
     }
 }
 
-/// The confirmation text, saying exactly what the plan will lose.
-fn discard_question(plan: &DiscardPlan) -> String {
-    const WARNING: &str = "This can't be undone.";
+/// Closes every confirmation dialog's text.
+const WARNING: &str = "This can't be undone.";
 
+/// The removal confirmation, saying what will be lost.
+fn removal_question(plan: &RemovalPlan) -> String {
+    let action = match plan.removal {
+        Removal::Worktree => format!("Remove the worktree {}?", plan.name),
+        Removal::Branch => format!("Remove the worktree and delete the branch {}?", plan.name),
+    };
+    let changes = match plan.changes {
+        1 => "1 uncommitted change".to_string(),
+        count => format!("{count} uncommitted changes"),
+    };
+    format!("{action} Its {changes} will be lost.\n\n{WARNING}")
+}
+
+/// The discard confirmation, saying exactly what the plan will lose.
+fn discard_question(plan: &DiscardPlan) -> String {
     match plan.files.as_slice() {
         [(path, true)] if path.ends_with('/') => format!(
             "Delete the untracked folder {path} and everything in it (except ignored \

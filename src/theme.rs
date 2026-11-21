@@ -64,6 +64,8 @@ pub mod icon_sizes {
 }
 
 pub mod layouts {
+    use iced::{Padding, Pixels, widget::text::LineHeight};
+
     // Bars and panels
     pub const TOP_BAR_HEIGHT: f32 = 48.0;
     pub const SIDEBAR_WIDTH: f32 = 260.0;
@@ -96,6 +98,54 @@ pub mod layouts {
     pub const GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 10.0;
     pub const REPO_GAP: f32 = 14.0;
+
+    // Sidebar tags ("main", "gone"): the label's line box and the padding around it,
+    // chosen so the lowercase letters sit centered between the borders. Segoe UI's line
+    // box keeps tall room above the letters (for accents), which put them 2px low, with
+    // the "g" touching the bottom border; so on Windows the box is shortened and the
+    // room moved below it. Same outer height either way. Measured by rendering the tags
+    // and counting pixels: 5px above and 5px below the letters' body on Windows. Inter
+    // sits centered with the defaults; San Francisco's metrics are close to Inter's.
+    #[cfg(target_os = "windows")]
+    pub const TAG_LINE_HEIGHT: LineHeight = LineHeight::Absolute(Pixels(13.0));
+    #[cfg(target_os = "windows")]
+    pub const TAG_PADDING: Padding = Padding {
+        top: 1.0,
+        right: 5.0,
+        bottom: 4.0,
+        left: 5.0,
+    };
+    #[cfg(not(target_os = "windows"))]
+    pub const TAG_LINE_HEIGHT: LineHeight = LineHeight::Relative(1.3);
+    #[cfg(not(target_os = "windows"))]
+    pub const TAG_PADDING: Padding = Padding {
+        top: 1.0,
+        right: 5.0,
+        bottom: 1.0,
+        left: 5.0,
+    };
+
+    // The sidebar's change-count pill: the same Segoe UI effect put its digits 1px low
+    // (6px above, 4px below); this gives 5 and 5 at the same height, measured the same
+    // way. Not measured on macOS yet: Inter showed the opposite (1px high).
+    #[cfg(target_os = "windows")]
+    pub const PILL_LINE_HEIGHT: LineHeight = LineHeight::Absolute(Pixels(14.0));
+    #[cfg(target_os = "windows")]
+    pub const PILL_PADDING: Padding = Padding {
+        top: 2.0,
+        right: 6.0,
+        bottom: 3.0,
+        left: 6.0,
+    };
+    #[cfg(not(target_os = "windows"))]
+    pub const PILL_LINE_HEIGHT: LineHeight = LineHeight::Relative(1.3);
+    #[cfg(not(target_os = "windows"))]
+    pub const PILL_PADDING: Padding = Padding {
+        top: 1.0,
+        right: 6.0,
+        bottom: 1.0,
+        left: 6.0,
+    };
 }
 
 pub mod radii {

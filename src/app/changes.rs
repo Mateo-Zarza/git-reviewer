@@ -11,7 +11,7 @@ use iced::widget::{
 use iced::{
     Alignment::Center,
     Border, Color, Element, Fill, Padding,
-    alignment::{Horizontal::Right, Vertical::Bottom},
+    alignment::{Horizontal, Vertical::Bottom},
 };
 use iced_palace::widget::ellipsized_text;
 
@@ -295,7 +295,7 @@ impl App {
                     .font(fonts::UI_SEMIBOLD)
                     .color(kind_color(kind))
                     .width(STATUS_LETTER_WIDTH)
-                    .align_x(Right),
+                    .align_x(Horizontal::Center),
             ]
             .spacing(layouts::GAP)
             .height(Fill)
@@ -336,49 +336,21 @@ impl App {
                 .base_counts
                 .as_ref()
                 .is_none_or(|(_, (ahead, _))| *ahead == 0);
-        let dirty = !status.files.is_empty();
-        let request = |removal: Removal| {
-            if dirty {
-                Message::ConfirmRemoval(removal)
-            } else {
-                removal.message(false)
-            }
-        };
-
-        let footer_button = |label: &'static str| {
+        // With uncommitted changes, `update` asks in a dialog before removing anything.
+        let footer_button = |label: &'static str, removal: Removal, enabled: bool| {
             button(text(label).width(Fill).height(Fill).center())
+                .on_press_maybe(enabled.then_some(Message::RemovalRequested(removal)))
                 .height(layouts::BUTTON_HEIGHT)
                 .width(Fill)
+                .style(theme::danger_button)
         };
 
-        match self.pending_removal {
-            None => row![
-                footer_button("Rm. worktree")
-                    .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
-                    .style(theme::danger_button),
-                footer_button("Del. branch")
-                    .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
-                    .style(theme::danger_button),
-            ]
-            .spacing(layouts::GAP)
-            .into(),
-            Some(removal) => column![
-                text(format!("Discard {} changes and remove?", status.files.len()))
-                    .width(Fill)
-                    .center(),
-                row![
-                    footer_button("Remove")
-                        .on_press(removal.message(true))
-                        .style(theme::danger_button),
-                    footer_button("Cancel")
-                        .on_press(Message::CancelRemoval)
-                        .style(theme::outline_button),
-                ]
-                .spacing(layouts::GAP),
-            ]
-            .spacing(layouts::GAP)
-            .into(),
-        }
+        row![
+            footer_button("Rm. worktree", Removal::Worktree, worktree_removable),
+            footer_button("Del. branch", Removal::Branch, branch_deletable),
+        ]
+        .spacing(layouts::GAP)
+        .into()
     }
 }
 
@@ -425,7 +397,9 @@ fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
 }
 
 /// The status letter column at the right end of a file row (wide enough for a
-/// semibold "M" at the body size).
+/// semibold "M" at the body size). Letters are centered in it: they differ in width
+/// (M is wider than D or A), so right-aligned they started at different places and the
+/// column looked ragged; centered, they share one center line.
 const STATUS_LETTER_WIDTH: f32 = 14.0;
 
 /// The buttons a row shows only while hovered, right-aligned over the row, `inset`
