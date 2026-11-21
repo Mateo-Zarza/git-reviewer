@@ -3,6 +3,7 @@ use iced::Settings;
 use crate::{app::App, theme::text_sizes};
 
 mod app;
+mod config;
 mod git;
 mod theme;
 

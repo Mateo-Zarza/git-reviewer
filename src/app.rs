@@ -7,13 +7,16 @@ mod diff;
 mod sidebar;
 mod watch;
 
-use std::{env::args, path::PathBuf};
+use std::env::args;
+use std::fmt;
+use std::path::{PathBuf, absolute};
 
 use iced::widget::operation;
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::{Container, button, column, container, row, rule, space, text, text_editor};
 use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task};
 
+use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
@@ -27,6 +30,10 @@ pub enum Message {
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
     WatchFailed(String),
+    /// Open the system folder picker to choose the root.
+    ChooseRoot,
+    /// The picker closed: the chosen folder, or `None` if it was cancelled.
+    RootChosen(Option<PathBuf>),
     Stage(String),
     Unstage(String),
     StageAll,
@@ -60,33 +67,118 @@ impl Removal {
 }
 
 pub struct App {
-    workspace: Result<Workspace, GitError>,
+    workspace: Result<Workspace, AppError>,
     selected_worktree_path: Option<PathBuf>,
     selected_file: Option<(String, DiffSource)>,
     status: Option<Result<Status, GitError>>,
-    root: PathBuf,
+    /// `None` until a root is given on the command line or saved in the config.
+    root: Option<PathBuf>,
+    config: Config,
+    /// False when the config file exists but couldn't be read: it's then never written,
+    /// so whatever the user put in it isn't destroyed.
+    config_is_writable: bool,
     diff: Option<Result<Diff, GitError>>,
-    error: Option<GitError>,
+    error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
+    /// Set when the selected repo's base from the config doesn't resolve. Kept apart
+    /// from `error` so it neither hides nor gets hidden by git errors.
+    base_error: Option<String>,
     pending_removal: Option<Removal>,
 }
 impl App {
+    /// The root comes from the command line when one is given (and is then remembered
+    /// in the config), otherwise from the config.
     pub fn new() -> Self {
-        let path = args().nth(1).unwrap_or_else(|| ".".to_string());
-        let workspace = Workspace::scan(&path);
+        let mut error = None;
+        // Only an existing folder is used (and remembered): a typo on the command line
+        // must not replace a good saved root.
+        let cli_root = args()
+            .nth(1)
+            .map(PathBuf::from)
+            .and_then(|path| match absolute(&path) {
+                Ok(path) if path.is_dir() => Some(path),
+                _ => {
+                    error = Some(AppError::Message(format!(
+                        "`{}` is not a folder; ignoring it",
+                        path.display()
+                    )));
+                    None
+                }
+            });
 
-        App {
-            workspace,
+        let loaded = Config::load();
+        let config_is_writable = loaded.is_ok();
+        let config = match loaded {
+            Ok(mut config) => {
+                if cli_root.is_some() && config.root != cli_root {
+                    config.root = cli_root.clone();
+                    if let Err(err) = config.save() {
+                        error = Some(config_error(err));
+                    }
+                }
+                config
+            }
+            // An unreadable or invalid file is reported and left untouched (saving
+            // over it would destroy whatever the user wrote); the app runs on defaults.
+            Err(err) => {
+                error = Some(config_error(err));
+                Config::default()
+            }
+        };
+
+        let mut app = App {
+            workspace: Err(AppError::Message(String::new())), // replaced by the scan below
             selected_worktree_path: None,
             selected_file: None,
             status: None,
-            root: path.into(),
+            root: cli_root.or_else(|| config.root.clone()),
+            config,
+            config_is_writable,
             diff: None,
-            error: None,
+            error,
             commit_message: text_editor::Content::new(),
             base_counts: None,
+            base_error: None,
             pending_removal: None,
+        };
+        app.workspace = app.scan();
+        app
+    }
+
+    /// Switches to another root folder: remembers it in the config, forgets the old
+    /// selection, and rescans. The watcher follows on its own, since the worktree list
+    /// it's keyed on changes.
+    fn set_root(&mut self, root: PathBuf) {
+        self.root = Some(root.clone());
+        self.error = None;
+        if self.config_is_writable {
+            self.config.root = Some(root);
+            if let Err(err) = self.config.save() {
+                self.error = Some(config_error(err));
+            }
+        }
+
+        self.selected_worktree_path = None;
+        self.selected_file = None;
+        self.diff = None;
+        self.pending_removal = None;
+        self.workspace = self.scan();
+        self.load_status();
+    }
+
+    fn scan(&self) -> Result<Workspace, AppError> {
+        match &self.root {
+            // A relative root (hand-written in the config) would depend on where the app
+            // was launched from, which for a macOS app opened from Finder is `/`.
+            Some(root) if root.is_relative() => Err(AppError::Message(format!(
+                "Config: root `{}` must be an absolute path",
+                root.display()
+            ))),
+            Some(root) => Workspace::scan(root).map_err(AppError::from),
+            None => Err(AppError::Message(
+                "No folder to show yet. Choose the folder that holds your repos.".to_string(),
+            )),
         }
     }
 
@@ -100,15 +192,37 @@ impl App {
                 self.load_status();
             }
             Message::Refresh | Message::FilesChanged => {
-                self.workspace = Workspace::scan(&self.root);
+                // The Refresh button also re-reads the config's bases, so fixing one
+                // doesn't need a restart. (The root stays: it decides what's watched.)
+                if matches!(message, Message::Refresh) {
+                    match Config::load() {
+                        Ok(config) => self.config.bases = config.bases,
+                        Err(err) => self.error = Some(config_error(err)),
+                    }
+                }
+                self.workspace = self.scan();
                 self.load_status();
                 self.retarget_selected_file();
             }
             Message::WatchFailed(reason) => {
-                self.error = Some(GitError::CommandFailed(format!(
+                self.error = Some(AppError::Message(format!(
                     "Auto-refresh unavailable ({reason}); use Refresh"
                 )));
             }
+            Message::ChooseRoot => {
+                let mut dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Choose the folder that holds your repos");
+                if let Some(root) = &self.root {
+                    dialog = dialog.set_directory(root);
+                }
+                // The dialog is the OS's own; awaiting it as a task keeps the app's
+                // event loop running while it's open.
+                return Task::perform(dialog.pick_folder(), |folder| {
+                    Message::RootChosen(folder.map(|handle| handle.path().to_path_buf()))
+                });
+            }
+            Message::RootChosen(Some(root)) => self.set_root(root),
+            Message::RootChosen(None) => {} // picker cancelled
             Message::FileSelected { path, source } => {
                 self.selected_file = Some((path, source));
                 self.load_diff();
@@ -118,7 +232,7 @@ impl App {
             }
             Message::Stage(path) => {
                 if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.stage(&path).err();
+                    self.error = worktree.stage(&path).err().map(AppError::from);
                 }
 
                 self.load_status();
@@ -126,7 +240,7 @@ impl App {
             }
             Message::Unstage(path) => {
                 if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.unstage(&path).err();
+                    self.error = worktree.unstage(&path).err().map(AppError::from);
                 }
 
                 self.load_status();
@@ -134,7 +248,7 @@ impl App {
             }
             Message::StageAll => {
                 if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.stage_all().err();
+                    self.error = worktree.stage_all().err().map(AppError::from);
                 }
 
                 self.load_status();
@@ -142,7 +256,7 @@ impl App {
             }
             Message::UnstageAll => {
                 if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.unstage_all().err();
+                    self.error = worktree.unstage_all().err().map(AppError::from);
                 }
 
                 self.load_status();
@@ -159,7 +273,7 @@ impl App {
                             self.error = None;
                         }
                         Err(err) => {
-                            self.error = Some(err);
+                            self.error = Some(err.into());
                         }
                     }
                     self.load_status();
@@ -178,11 +292,11 @@ impl App {
             }
             Message::Fetched(result) => {
                 if let Err(err) = result {
-                    self.error = Some(err);
+                    self.error = Some(err.into());
                 }
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
                 // everything rather than just the selected status.
-                self.workspace = Workspace::scan(&self.root);
+                self.workspace = self.scan();
                 self.load_status();
             }
             Message::Sync => {
@@ -192,7 +306,7 @@ impl App {
                 }
             }
             Message::Synced(result) => {
-                self.error = result.err();
+                self.error = result.err().map(AppError::from);
                 self.load_status();
                 self.load_diff();
             }
@@ -203,7 +317,7 @@ impl App {
                 }
             }
             Message::Published(result) => {
-                self.error = result.err();
+                self.error = result.err().map(AppError::from);
                 self.load_status();
                 self.load_diff();
             }
@@ -220,11 +334,11 @@ impl App {
                             self.diff = None;
                         }
                         Err(err) => {
-                            self.error = Some(err);
+                            self.error = Some(err.into());
                         }
                     }
                 }
-                self.workspace = Workspace::scan(&self.root);
+                self.workspace = self.scan();
                 self.load_status();
             }
             Message::DeleteBranch { force } => {
@@ -242,14 +356,14 @@ impl App {
                             self.error = None;
                         }
                         Err(err) => {
-                            self.error = Some(err);
+                            self.error = Some(err.into());
                         }
                     }
                     self.selected_worktree_path = None;
                     self.selected_file = None;
                     self.diff = None;
                 }
-                self.workspace = Workspace::scan(&self.root);
+                self.workspace = self.scan();
                 self.load_status();
             }
             Message::ConfirmRemoval(removal) => {
@@ -284,9 +398,33 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let body: Element<'_, Message> = match &self.workspace {
-            Err(err) => empty_state(err.to_string(), colors::DANGER)
+            // No root yet, or it can't be read (moved, deleted): offer to pick one.
+            Err(err) => {
+                let color = if self.root.is_some() {
+                    colors::DANGER
+                } else {
+                    colors::TEXT_MUTED
+                };
+
+                container(
+                    column![
+                        empty_state(err.to_string(), color),
+                        button(
+                            text("Choose folder…")
+                                .font(fonts::UI_SEMIBOLD)
+                                .height(Fill)
+                                .center(),
+                        )
+                            .on_press(Message::ChooseRoot)
+                            .height(layouts::PRIMARY_BUTTON_HEIGHT)
+                            .padding([0.0, 16.0])
+                            .style(theme::primary_button),
+                    ]
+                    .align_x(Center),
+                )
                 .center(Fill)
-                .into(),
+                .into()
+            }
             Ok(workspace) => row![
                 self.sidebar(workspace),
                 rule::vertical(1).style(theme::divider),
@@ -328,10 +466,21 @@ impl App {
                 text("Git Reviewer")
                     .font(fonts::UI_SEMIBOLD)
                     .size(text_sizes::TITLE),
-                text(self.root.to_string_lossy())
+                // The root path doubles as the button to change it.
+                button(
+                    text(
+                        self.root
+                            .as_ref()
+                            .map(|root| root.display().to_string())
+                            .unwrap_or_else(|| "Choose folder…".to_string())
+                    )
                     .font(fonts::MONO)
                     .size(text_sizes::SMALL)
                     .color(colors::TEXT_MUTED),
+                )
+                .on_press(Message::ChooseRoot)
+                .padding([4.0, 8.0])
+                .style(theme::list_row(false)),
                 text(
                     self.error
                         .as_ref()
@@ -367,19 +516,31 @@ impl App {
             worktree.set_cached_status(status.as_ref().ok().cloned());
         }
 
-        let base = self.selected_repo().and_then(|repo| repo.default_base());
+        // A base set in the config wins over the repo's origin/HEAD.
+        let configured_base = self
+            .selected_repo()
+            .and_then(|repo| self.config.base_for(repo.name()))
+            .map(String::from);
+        let base = configured_base
+            .clone()
+            .or_else(|| self.selected_repo().and_then(|repo| repo.default_base()));
 
-        match (base, self.selected_worktree()) {
-            (Some(base), Some(worktree)) => {
-                self.base_counts = worktree
-                    .ahead_behind(&base)
-                    .ok()
-                    .map(|counts| (base, counts));
-            }
-            _ => {
-                self.base_counts = None;
-            }
-        }
+        self.base_error = None;
+        self.base_counts = match (base, self.selected_worktree()) {
+            (Some(base), Some(worktree)) => match worktree.ahead_behind(&base) {
+                Ok(counts) => Some((base, counts)),
+                Err(_) => {
+                    // A configured base that doesn't resolve is a typo in the config;
+                    // say so instead of quietly dropping the "from base" line.
+                    if configured_base.is_some() {
+                        self.base_error =
+                            Some(format!("Base `{base}` from the config not found"));
+                    }
+                    None
+                }
+            },
+            _ => None,
+        };
     }
 
     /// After anything that changes the index (stage, unstage, commit, refresh), keeps the
@@ -444,6 +605,34 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// What the top bar's error slot (and the empty window, when there's no workspace) shows.
+#[derive(Debug, Clone)]
+pub enum AppError {
+    /// A failed git command, shown with git's own message.
+    Git(GitError),
+    /// The app's own problems (config, file watcher, root folder), shown as written.
+    Message(String),
+}
+
+impl From<GitError> for AppError {
+    fn from(err: GitError) -> Self {
+        AppError::Git(err)
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::Git(err) => err.fmt(f),
+            AppError::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+fn config_error(err: ConfigError) -> AppError {
+    AppError::Message(format!("Config: {err}"))
 }
 
 /// A centered, muted message for panels with nothing to show (shared by the panels).

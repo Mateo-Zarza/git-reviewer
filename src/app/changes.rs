@@ -75,11 +75,19 @@ impl App {
             ]
             .spacing(layouts::GAP)
             .align_y(Bottom),
-            base_line.map(|line| {
-                text(line)
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_DIM)
-            }),
+            // A broken base from the config takes the base line's place, in red.
+            match &self.base_error {
+                Some(problem) => Some(
+                    text(problem.as_str())
+                        .size(text_sizes::LABEL)
+                        .color(colors::DANGER)
+                ),
+                None => base_line.map(|line| {
+                    text(line)
+                        .size(text_sizes::LABEL)
+                        .color(colors::TEXT_DIM)
+                }),
+            },
         ]
         .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
         .into()
@@ -239,8 +247,10 @@ impl App {
         let worktree_removable = !self.selected_worktree().is_some_and(|w| w.is_main());
         // Deliberate deviation from VS Code: only offer to delete branches with nothing
         // unmerged into the base (no base known → let `git branch -d` decide).
+        // A configured base that doesn't resolve can't vouch for anything: fail closed.
         let branch_deletable = worktree_removable
             && status.branch.is_some()
+            && self.base_error.is_none()
             && self
                 .base_counts
                 .as_ref()
