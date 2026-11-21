@@ -191,10 +191,17 @@ pub mod icons {
     pub const SYNC: &[u8] = include_bytes!("../assets/icons/sync.svg");
     pub const DISCARD: &[u8] = include_bytes!("../assets/icons/discard.svg");
     pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
+    pub const CHEVRON_RIGHT: &[u8] = include_bytes!("../assets/icons/chevron-right.svg");
     pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
+
+    /// A foldable section's chevron: down while it's open, right while it's collapsed.
+    pub fn chevron<'a>(open: bool) -> Svg<'a> {
+        let bytes = if open { CHEVRON_DOWN } else { CHEVRON_RIGHT };
+        icon(bytes, super::icon_sizes::CHEVRON, super::colors::TEXT_MUTED)
+    }
 
     pub fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> Svg<'a> {
         svg(svg::Handle::from_memory(bytes))

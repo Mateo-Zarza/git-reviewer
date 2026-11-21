@@ -120,9 +120,14 @@ fn diff_body(diff: &Diff) -> Element<'_, Message> {
     responsive(move |size| {
         let width = content_width.max(size.width);
 
-        scrollable(
-            column(diff.lines.iter().map(|line| diff_line_view(line, width))).padding([8.0, 0.0]),
-        )
+        // The first hunk header sits right under the header bar: no padding on top.
+        let lines = diff
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| diff_line_view(line, width, index == 0));
+
+        scrollable(column(lines).padding(Padding::ZERO.bottom(8.0)))
         .id(DIFF_SCROLLABLE)
         .direction(Direction::Both {
             vertical: theme::thin_scrollbar(),
@@ -136,16 +141,20 @@ fn diff_body(diff: &Diff) -> Element<'_, Message> {
     .into()
 }
 
-fn diff_line_view(line: &DiffLine, width: f32) -> Element<'_, Message> {
+/// One diff line. `first` is true for the diff's first line (always a hunk header).
+fn diff_line_view(line: &DiffLine, width: f32, first: bool) -> Element<'_, Message> {
     let (old, new, sign, gutter_bg, line_bg, sign_color) = match line {
         DiffLine::Hunk(header) => {
+            // A gap only above later hunks, to set them apart from the lines before;
+            // the lines below follow with no gap, like VS Code.
+            let gap_above = if first { 0.0 } else { 6.0 };
             return container(
                 container(mono(display_text(header)).color(colors::HUNK_TEXT))
                     .padding([2.0, HUNK_PADDING_X])
                     .width(width)
                     .style(|_| container::background(colors::HUNK_BG)),
             )
-            .padding(Padding::ZERO.top(6.0).bottom(2.0))
+            .padding(Padding::ZERO.top(gap_above))
             .into();
         }
         DiffLine::Context { old, new, .. } => (

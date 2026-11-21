@@ -8,9 +8,9 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment::Center, Color, Element, Fill, Padding};
 use iced_palace::widget::ellipsized_text;
 
-use super::{App, Message};
+use super::{App, Message, Section};
 use crate::git::{Repo, Workspace, Worktree};
-use crate::theme::icons::{self, icon};
+use crate::theme::icons::{self, chevron, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
@@ -27,8 +27,11 @@ impl App {
                             .color(colors::TEXT_MUTED),
                     )
                     .padding([0.0, 8.0]),
-                    column(workspace.repos().iter().map(|repo| repo_view(repo, selected)))
-                        .spacing(layouts::REPO_GAP),
+                    column(workspace.repos().iter().map(|repo| {
+                        let open = self.is_open(&Section::Repo(repo.name().to_string()));
+                        repo_view(repo, selected, open)
+                    }))
+                    .spacing(layouts::REPO_GAP),
                 ]
                 .spacing(layouts::REPO_GAP),
             )
@@ -43,7 +46,9 @@ impl App {
     }
 }
 
-fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message> {
+/// A repo's header (chevron, name, worktree count), which folds its worktree list away
+/// when clicked, and the list itself while open.
+fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element<'a, Message> {
     let count = repo.worktrees().len();
     let count_label = if count == 1 {
         "1 worktree".to_string()
@@ -51,26 +56,34 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message
         format!("{count} worktrees")
     };
 
-    column![
+    let header = button(
         row![
-            icon(icons::CHEVRON_DOWN, icon_sizes::CHEVRON, colors::TEXT_MUTED),
+            chevron(open),
             text(repo.name()).font(fonts::UI_SEMIBOLD),
             text(count_label)
                 .size(text_sizes::SMALL)
                 .color(colors::TEXT_DIM),
         ]
         .spacing(6)
-        .align_y(Center)
-        .padding([2.0, 8.0]),
-        column(
-            repo.worktrees()
-                .iter()
-                .map(|wt| worktree_view(wt, selected))
-        )
-        .spacing(2),
-    ]
-    .spacing(2)
-    .into()
+        .align_y(Center),
+    )
+    .on_press(Message::ToggleSection(Section::Repo(repo.name().to_string())))
+    .width(Fill)
+    .padding([2.0, 8.0])
+    .style(theme::list_row(false));
+
+    let mut view = column![header].spacing(2);
+    if open {
+        view = view.push(
+            column(
+                repo.worktrees()
+                    .iter()
+                    .map(|wt| worktree_view(wt, selected)),
+            )
+            .spacing(2),
+        );
+    }
+    view.into()
 }
 
 fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element<'a, Message> {

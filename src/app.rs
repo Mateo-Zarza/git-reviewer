@@ -8,6 +8,7 @@ mod file_icon;
 mod sidebar;
 mod watch;
 
+use std::collections::HashSet;
 use std::env::args;
 use std::fmt;
 use std::path::{PathBuf, absolute};
@@ -59,6 +60,20 @@ pub enum Message {
     RemovalRequested(Removal),
     /// The confirmation for a worktree with uncommitted changes closed; `true` if yes.
     RemovalAnswered(RemovalPlan, bool),
+    /// A section header was clicked: fold the section away, or open it again.
+    ToggleSection(Section),
+}
+
+/// A list section that folds away when its header is clicked, like VS Code's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Section {
+    /// The staged files group.
+    Staged,
+    /// The unstaged files group ("CHANGES").
+    Changes,
+    /// A repo's worktree list in the sidebar, by the repo's name (its folder's name,
+    /// unique under the root).
+    Repo(String),
 }
 
 /// Which footer button was clicked.
@@ -132,6 +147,9 @@ pub struct App {
     /// Set when the selected repo's base from the config doesn't resolve. Kept apart
     /// from `error` so it neither hides nor gets hidden by git errors.
     base_error: Option<String>,
+    /// Sections folded away by the user; every other section is open. Kept while the
+    /// app runs, across worktree switches, like VS Code (not saved to the config).
+    collapsed: HashSet<Section>,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
@@ -189,6 +207,7 @@ impl App {
             commit_message: text_editor::Content::new(),
             base_counts: None,
             base_error: None,
+            collapsed: HashSet::new(),
         };
         app.workspace = app.scan();
         app
@@ -522,6 +541,12 @@ impl App {
                     self.remove(&plan, true);
                 }
             }
+            Message::ToggleSection(section) => {
+                // `remove` is false when it wasn't collapsed: then collapse it.
+                if !self.collapsed.remove(&section) {
+                    self.collapsed.insert(section);
+                }
+            }
         }
         Task::none()
     }
@@ -748,6 +773,10 @@ impl App {
         {
             self.diff = Some(selected.diff(&file, *source));
         }
+    }
+
+    fn is_open(&self, section: &Section) -> bool {
+        !self.collapsed.contains(section)
     }
 
     fn selected_worktree(&self) -> Option<&Worktree> {

@@ -20,9 +20,9 @@ use std::f32::consts::TAU;
 use iced::{Radians, Rotation};
 
 use super::file_icon::file_icon;
-use super::{App, DiscardScope, Message, RemoteOp, Removal, empty_state};
+use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
-use crate::theme::icons::{self, icon};
+use crate::theme::icons::{self, chevron, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
@@ -202,30 +202,41 @@ impl App {
                 .into();
         }
 
-        // One group per side of the index; like VS Code, an empty group isn't shown.
-        let group = |title: &str, staged: bool| -> Option<Element<'a, Message>> {
-            let rows: Vec<Element<'a, Message>> = status
+        // One group per side of the index; like VS Code, an empty group isn't shown,
+        // and a collapsed one shows just its header.
+        let group = |title: &str, section: Section| -> Option<Element<'a, Message>> {
+            let staged = section == Section::Staged;
+            let files: Vec<(&FileEntry, ChangeKind)> = status
                 .files
                 .iter()
                 .filter_map(|file| {
                     let kind = if staged { file.staged } else { file.unstaged }?;
-                    Some(self.file_row(file, kind, staged))
+                    Some((file, kind))
                 })
                 .collect();
+            if files.is_empty() {
+                return None;
+            }
 
-            (!rows.is_empty()).then(|| {
-                column![
-                    section_header(format!("{title} · {}", rows.len()), staged),
-                    column(rows).spacing(1),
-                ]
-                .into()
-            })
+            let open = self.is_open(&section);
+            let mut group =
+                column![section_header(format!("{title} · {}", files.len()), section, open)];
+            if open {
+                let rows = files
+                    .into_iter()
+                    .map(|(file, kind)| self.file_row(file, kind, staged));
+                group = group.push(column(rows).spacing(1));
+            }
+            Some(group.into())
         };
 
         // `flatten` drops hidden groups, so a lone group gets no stray SECTION_GAP.
-        let groups = [group("STAGED CHANGES", true), group("CHANGES", false)]
-            .into_iter()
-            .flatten();
+        let groups = [
+            group("STAGED CHANGES", Section::Staged),
+            group("CHANGES", Section::Changes),
+        ]
+        .into_iter()
+        .flatten();
 
         container(column(groups).spacing(layouts::SECTION_GAP))
             .padding(layouts::GAP)
@@ -371,9 +382,10 @@ fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Mess
     Binding::from_key_press(key_press)
 }
 
-/// "STAGED CHANGES · 3" with its stage-all / unstage-all button on the right.
-fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
-    let actions = if staged {
+/// "STAGED CHANGES · 3" behind a chevron, with its stage-all / unstage-all buttons on
+/// the right. Clicking anywhere else on it folds the group away or opens it again.
+fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a, Message> {
+    let actions = if section == Section::Staged {
         row![icon_button(icons::MINUS, Message::UnstageAll, false)]
     } else {
         row![
@@ -382,18 +394,26 @@ fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
         ]
     };
 
-    let title = container(
-        text(title)
-            .size(text_sizes::LABEL)
-            .font(fonts::UI_SEMIBOLD)
-            .color(colors::TEXT_MUTED),
+    let title = button(
+        row![
+            chevron(open),
+            text(title)
+                .size(text_sizes::LABEL)
+                .font(fonts::UI_SEMIBOLD)
+                .color(colors::TEXT_MUTED),
+        ]
+        .spacing(6)
+        .height(Fill)
+        .align_y(Center),
     )
+    .on_press(Message::ToggleSection(section))
     .width(Fill)
     .height(layouts::LIST_ROW_HEIGHT)
     .padding([0.0, 8.0])
-    .align_y(Center);
+    .style(theme::list_row(false));
 
-    hover(title, hover_actions(actions, colors::SURFACE, 4.0))
+    // The header is hovered whenever its actions show, so they sit on HOVER too.
+    hover(title, hover_actions(actions, colors::HOVER, 4.0))
 }
 
 /// The status letter column at the right end of a file row (wide enough for a
