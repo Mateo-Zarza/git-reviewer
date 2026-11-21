@@ -44,6 +44,13 @@ impl Workspace {
             .find(|worktree| worktree.path() == path)
     }
 
+    pub fn find_worktree_mut(&mut self, path: &Path) -> Option<&mut Worktree> {
+        self.repos
+            .iter_mut()
+            .flat_map(|repo| repo.worktrees_mut())
+            .find(|worktree| worktree.path() == path)
+    }
+
     pub fn find_repo(&self, worktree_path: &Path) -> Option<&Repo> {
         self.repos.iter().find(|repo| {
             repo.worktrees()

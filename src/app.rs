@@ -159,17 +159,20 @@ impl App {
             Message::FetchAll => {
                 self.error = None;
                 if let Ok(workspace) = &self.workspace {
-                    let tasks =
-                        workspace.repos().iter().cloned().map(|repo| {
-                            Task::perform(async move { repo.fetch() }, Message::Fetched)
-                        });
-                    return Task::batch(tasks);
+                    let repos = workspace.repos().to_vec();
+                    return Task::perform(
+                        async move { Repo::fetch_all(&repos) },
+                        Message::Fetched,
+                    );
                 }
             }
             Message::Fetched(result) => {
                 if let Err(err) = result {
                     self.error = Some(err);
                 }
+                // `fetch --prune` can make upstreams gone in any worktree, so rescan
+                // everything rather than just the selected status.
+                self.workspace = Workspace::scan(&self.root);
                 self.load_status();
             }
             Message::Sync => {
@@ -352,6 +355,17 @@ impl App {
     fn load_status(&mut self) {
         self.status = self.selected_worktree().map(|worktree| worktree.status());
 
+        // Keep the selected row's sidebar badges in sync with what was just loaded,
+        // so stage/unstage/commit update the pill without a full rescan.
+        if let (Some(status), Some(path), Ok(workspace)) = (
+            &self.status,
+            &self.selected_worktree_path,
+            &mut self.workspace,
+        ) && let Some(worktree) = workspace.find_worktree_mut(path)
+        {
+            worktree.set_cached_status(status.as_ref().ok().cloned());
+        }
+
         let base = self.selected_repo().and_then(|repo| repo.default_base());
 
         match (base, self.selected_worktree()) {
@@ -423,11 +437,31 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message
 fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element<'a, Message> {
     let label = worktree.branch().unwrap_or(&worktree.head()[..7]);
     let is_selected = selected == Some(worktree.path());
-    let main_tag = worktree.is_main().then(|| {
-        container(text("main").size(text_sizes::TAG))
+    let status = worktree.cached_status();
+    let tag = |label: &'static str, border: Color, color: Color| {
+        container(text(label).size(text_sizes::TAG))
             .padding([1.0, 5.0])
-            .style(theme::tag(colors::TAG_BORDER, colors::TEXT_MUTED))
-    });
+            .style(theme::tag(border, color))
+    };
+
+    let main_tag = worktree
+        .is_main()
+        .then(|| tag("main", colors::TAG_BORDER, colors::TEXT_MUTED));
+    let gone_tag = status
+        .is_some_and(|s| s.is_upstream_gone())
+        .then(|| tag("gone", colors::DANGER_BORDER, colors::DANGER));
+    let change_pill = status
+        .map(|s| s.change_count())
+        .filter(|count| *count > 0)
+        .map(|count| {
+            container(
+                text(count.to_string())
+                    .size(text_sizes::LABEL)
+                    .font(fonts::UI_SEMIBOLD),
+            )
+            .padding([1.0, 6.0])
+            .style(theme::pill)
+        });
 
     button(
         row![
@@ -436,6 +470,8 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
                 .wrapping(Wrapping::None)
                 .width(Fill),
             main_tag,
+            gone_tag,
+            change_pill,
         ]
         .spacing(layouts::GAP)
         .align_y(Center),

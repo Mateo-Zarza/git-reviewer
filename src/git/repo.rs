@@ -37,10 +37,22 @@ impl Repo {
         &self.worktrees
     }
 
+    pub(super) fn worktrees_mut(&mut self) -> &mut [Worktree] {
+        &mut self.worktrees
+    }
+
     pub fn refresh(&mut self) -> Result<(), GitError> {
         let cmd_output = self.git.run(&["worktree", "list", "--porcelain"])?;
 
         self.worktrees = Worktree::parse_list(&cmd_output);
+
+        // One `git status` per worktree, run in parallel so a repo with many
+        // worktrees doesn't multiply the refresh time.
+        std::thread::scope(|scope| {
+            for worktree in &mut self.worktrees {
+                scope.spawn(move || worktree.refresh_cached_status());
+            }
+        });
 
         Ok(())
     }
@@ -49,6 +61,22 @@ impl Repo {
         self.git.run(&["fetch", "--prune"])?;
 
         Ok(())
+    }
+
+    /// Fetches every repo in parallel and returns the first error, if any.
+    /// One call for all repos, so the app rescans once when everything is done.
+    pub fn fetch_all(repos: &[Repo]) -> Result<(), GitError> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = repos
+                .iter()
+                .map(|repo| scope.spawn(|| repo.fetch()))
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("fetch thread panicked"))
+                .collect()
+        })
     }
 
     pub fn default_base(&self) -> Option<String> {

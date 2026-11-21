@@ -231,6 +231,18 @@ pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+pub fn pill(_theme: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(colors::TEXT),
+        background: Some(colors::PILL.into()),
+        border: Border {
+            radius: radii::PILL.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn app_theme() -> Theme {
     Theme::custom(
         "Git Reviewer",

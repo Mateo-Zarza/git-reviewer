@@ -37,19 +37,34 @@ impl ChangeKind {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
     pub name: String,
     pub counts: Option<(usize, usize)>, // (ahead, behind)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub branch: Option<String>,
     pub files: Vec<FileEntry>,
     pub upstream: Option<Upstream>,
 }
 impl Status {
+    /// Number of entries across the staged and unstaged groups, like VS Code's badge:
+    /// a file with both staged and unstaged changes counts twice.
+    pub fn change_count(&self) -> usize {
+        self.files
+            .iter()
+            .map(|file| file.staged.is_some() as usize + file.unstaged.is_some() as usize)
+            .sum()
+    }
+
+    /// The branch tracks an upstream that no longer exists on the remote
+    /// (git prints `branch.upstream` but no `branch.ab`).
+    pub fn is_upstream_gone(&self) -> bool {
+        self.upstream.as_ref().is_some_and(|u| u.counts.is_none())
+    }
+
     pub(super) fn parse(output: &str) -> Status {
         let mut lines = output.split('\0');
 
@@ -203,6 +218,10 @@ mod tests {
         assert_eq!(status.files[4].staged, None);
         assert_eq!(status.files[4].unstaged, Some(ChangeKind::Untracked));
         assert_eq!(status.files[4].old_path, None);
+
+        // app.rs is MM, so it counts once per group: 2 + 1 + 1 + 1 + 1
+        assert_eq!(status.change_count(), 6);
+        assert!(!status.is_upstream_gone());
     }
 
     #[test]
@@ -214,6 +233,8 @@ mod tests {
 
         assert_eq!(status.branch, Some("feat/new".to_string()));
         assert_eq!(status.upstream, None);
+        assert!(!status.is_upstream_gone());
+        assert_eq!(status.change_count(), 0);
     }
 
     #[test]
@@ -232,6 +253,7 @@ mod tests {
                 counts: None,
             })
         );
+        assert!(status.is_upstream_gone());
     }
 
     #[test]

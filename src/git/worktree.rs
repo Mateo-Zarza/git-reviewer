@@ -9,6 +9,9 @@ pub struct Worktree {
     head: String,
     branch: Option<String>,
     is_main: bool,
+    /// Last known status, for the sidebar badges. `None` until loaded, or if
+    /// `git status` failed.
+    cached_status: Option<Status>,
 }
 impl Worktree {
     fn new(git: Git, head: String, branch: Option<String>, is_main: bool) -> Self {
@@ -17,7 +20,21 @@ impl Worktree {
             head,
             branch,
             is_main,
+            cached_status: None,
         }
+    }
+
+    pub fn cached_status(&self) -> Option<&Status> {
+        self.cached_status.as_ref()
+    }
+
+    pub fn set_cached_status(&mut self, status: Option<Status>) {
+        self.cached_status = status;
+    }
+
+    /// Runs `git status` and caches the result (a failure clears the cache).
+    pub(super) fn refresh_cached_status(&mut self) {
+        self.cached_status = self.status().ok();
     }
 
     pub fn path(&self) -> &Path {
@@ -67,9 +84,18 @@ impl Worktree {
     }
 
     pub fn status(&self) -> Result<Status, GitError> {
-        let output = self
-            .git
-            .run(&["status", "--porcelain=2", "--branch", "-z"])?;
+        // --ahead-behind: a `status.aheadBehind=false` config would otherwise drop
+        // `branch.ab`, which would read as "upstream gone" on every branch.
+        // --no-optional-locks: don't take index.lock just to refresh stat info,
+        // so background refreshes never collide with the user's own git commands.
+        let output = self.git.run(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=2",
+            "--branch",
+            "--ahead-behind",
+            "-z",
+        ])?;
         Ok(Status::parse(&output))
     }
 
