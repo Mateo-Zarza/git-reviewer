@@ -11,7 +11,7 @@ use iced_palace::widget::ellipsized_text;
 use super::{App, Message};
 use crate::git::{Repo, Workspace, Worktree};
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
     pub(super) fn sidebar<'a>(&'a self, workspace: &'a Workspace) -> Element<'a, Message> {
@@ -53,7 +53,7 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message
 
     column![
         row![
-            icon(icons::CHEVRON_DOWN, 12.0, colors::TEXT_MUTED),
+            icon(icons::CHEVRON_DOWN, icon_sizes::CHEVRON, colors::TEXT_MUTED),
             text(repo.name()).font(fonts::UI_SEMIBOLD),
             text(count_label)
                 .size(text_sizes::SMALL)
@@ -111,7 +111,7 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
 
     button(
         row![
-            icon(icons::GIT_BRANCH, 13.0, colors::TEXT_MUTED),
+            icon(icons::GIT_BRANCH, icon_sizes::ROW, colors::TEXT_MUTED),
             ellipsized_text(label)
                 .wrapping(Wrapping::None)
                 .width(Fill),

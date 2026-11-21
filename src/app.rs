@@ -22,7 +22,7 @@ use std::time::Instant;
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DIFF_SCROLLABLE;
 
 #[derive(Debug, Clone)]
@@ -567,7 +567,7 @@ impl App {
     fn top_bar(&self) -> Element<'_, Message> {
         let bar_button = |icon_bytes: &'static [u8], label: &'static str, message: Message| {
             button(
-                row![icon(icon_bytes, 14.0, colors::TEXT), text(label)]
+                row![icon(icon_bytes, icon_sizes::BUTTON, colors::TEXT), text(label)]
                     .spacing(6)
                     .height(Fill)
                     .align_y(Center),
@@ -591,8 +591,9 @@ impl App {
                             .map(|root| root.display().to_string())
                             .unwrap_or_else(|| "Choose folder…".to_string())
                     )
-                    .font(fonts::MONO)
-                    .size(text_sizes::SMALL)
+                    // Same size as the title: in a centered row, text of different sizes
+                    // sits at different baselines (~0.8px apart for 16 vs 14 in Segoe UI).
+                    .size(text_sizes::TITLE)
                     .color(colors::TEXT_MUTED),
                 )
                 .on_press(Message::ChooseRoot)

@@ -9,7 +9,9 @@ use iced::widget::{
     text_editor,
 };
 use iced::{
-    Alignment::Center, Border, Color, Element, Fill, Padding, alignment::Vertical::Bottom,
+    Alignment::Center,
+    Border, Color, Element, Fill, Padding,
+    alignment::{Horizontal::Right, Vertical::Bottom},
 };
 use iced_palace::widget::ellipsized_text;
 
@@ -21,7 +23,7 @@ use super::file_icon::file_icon;
 use super::{App, DiscardScope, Message, RemoteOp, Removal, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
     pub(super) fn changes_panel(&self) -> Element<'_, Message> {
@@ -151,14 +153,15 @@ impl App {
         let mut content = row![].spacing(layouts::GAP).align_y(Center);
         if let Some(bytes) = icon_bytes {
             content = content.push(
-                icon(bytes, 14.0, icon_color).rotation(Rotation::Floating(Radians(angle))),
+                icon(bytes, icon_sizes::BUTTON, icon_color)
+                    .rotation(Rotation::Floating(Radians(angle))),
             );
         }
         content = content.push(text(title).font(fonts::UI_SEMIBOLD));
         if let Some(counts_text) = counts_text {
             content = content.push(
                 text(counts_text)
-                    .font(fonts::MONO_MEDIUM)
+                    .font(fonts::UI_SEMIBOLD)
                     .size(text_sizes::SMALL),
             );
         }
@@ -178,7 +181,7 @@ impl App {
                     .on_action(Message::CommitMessageEdited)
                     .key_binding(move |key_press| commit_shortcut(key_press, can_commit))
                     .padding([8.0, 10.0])
-                    .height(72)
+                    .height(layouts::COMMIT_BOX_HEIGHT)
                     .style(theme::commit_input),
                 button(container(content).center(Fill))
                     .on_press_maybe(on_press)
@@ -248,32 +251,51 @@ impl App {
             .is_some_and(|(path, selected_source)| *path == file.path && *selected_source == source);
         // VS Code's order: discard first, then stage; a staged file can only be unstaged.
         let actions = if staged {
-            row![icon_button(icons::MINUS, Message::Unstage(file.path.clone()))]
+            row![icon_button(
+                icons::MINUS,
+                Message::Unstage(file.path.clone()),
+                is_selected,
+            )]
         } else {
             let discard = DiscardScope::File {
                 path: file.path.clone(),
                 untracked: kind == ChangeKind::Untracked,
             };
             row![
-                icon_button(icons::DISCARD, Message::DiscardRequested(discard)),
-                icon_button(icons::PLUS, Message::Stage(file.path.clone())),
+                icon_button(icons::DISCARD, Message::DiscardRequested(discard), is_selected),
+                icon_button(icons::PLUS, Message::Stage(file.path.clone()), is_selected),
             ]
         };
         let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
 
-        let row_button = button(
-            row![
-                text(kind.to_code().to_string())
-                    .font(fonts::MONO_MEDIUM)
-                    .color(kind_color(kind))
-                    .width(12),
-                file_icon(&file.path),
-                ellipsized_text(name).wrapping(Wrapping::None),
+        // The name gets the space first and only it is cut ("…") if it doesn't fit; the
+        // folder gets what's left, cut too, and disappears when nothing is left (the
+        // clip hides the lone "..." ellipsized text would draw at zero width).
+        let name_and_dir = row![
+            ellipsized_text(name).wrapping(Wrapping::None),
+            container(
                 ellipsized_text(dir)
                     .size(text_sizes::SMALL)
                     .color(colors::TEXT_DIM)
-                    .wrapping(Wrapping::None)
-                    .width(Fill),
+                    .wrapping(Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true),
+        ]
+        .spacing(layouts::GAP)
+        .align_y(Center);
+
+        // Icon and status letter have fixed widths, so iced sizes them first and they
+        // always keep their place; the name and folder share what's left in between.
+        let row_button = button(
+            row![
+                file_icon(&file.path),
+                container(name_and_dir).width(Fill),
+                text(kind.to_code().to_string())
+                    .font(fonts::UI_SEMIBOLD)
+                    .color(kind_color(kind))
+                    .width(STATUS_LETTER_WIDTH)
+                    .align_x(Right),
             ]
             .spacing(layouts::GAP)
             .height(Fill)
@@ -296,7 +318,10 @@ impl App {
             colors::HOVER
         };
 
-        hover(row_button, hover_actions(actions, row_color))
+        // The buttons stop just short of the status letter, which stays visible, like
+        // VS Code: row padding + letter + a small gap from the right edge.
+        let actions_inset = 8.0 + STATUS_LETTER_WIDTH + 4.0;
+        hover(row_button, hover_actions(actions, row_color, actions_inset))
     }
 
     fn changes_footer<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
@@ -377,11 +402,11 @@ fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Mess
 /// "STAGED CHANGES · 3" with its stage-all / unstage-all button on the right.
 fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
     let actions = if staged {
-        row![icon_button(icons::MINUS, Message::UnstageAll)]
+        row![icon_button(icons::MINUS, Message::UnstageAll, false)]
     } else {
         row![
-            icon_button(icons::DISCARD, Message::DiscardRequested(DiscardScope::All)),
-            icon_button(icons::PLUS, Message::StageAll),
+            icon_button(icons::DISCARD, Message::DiscardRequested(DiscardScope::All), false),
+            icon_button(icons::PLUS, Message::StageAll, false),
         ]
     };
 
@@ -396,13 +421,22 @@ fn section_header<'a>(title: String, staged: bool) -> Element<'a, Message> {
     .padding([0.0, 8.0])
     .align_y(Center);
 
-    hover(title, hover_actions(actions, colors::SURFACE))
+    hover(title, hover_actions(actions, colors::SURFACE, 4.0))
 }
 
-/// The buttons a row shows only while hovered, right-aligned over the row. They sit on
-/// a patch of `background` (the hovered row's color) so text underneath doesn't show
-/// through; clicks anywhere else fall through to the row itself.
-fn hover_actions<'a>(buttons: Row<'a, Message>, background: Color) -> Element<'a, Message> {
+/// The status letter column at the right end of a file row (wide enough for a
+/// semibold "M" at the body size).
+const STATUS_LETTER_WIDTH: f32 = 14.0;
+
+/// The buttons a row shows only while hovered, right-aligned over the row, `inset`
+/// from its right edge. They sit on a patch of `background` (the hovered row's color)
+/// so text underneath doesn't show through; clicks anywhere else fall through to the
+/// row itself.
+fn hover_actions<'a>(
+    buttons: Row<'a, Message>,
+    background: Color,
+    inset: f32,
+) -> Element<'a, Message> {
     row![
         space().width(Fill),
         container(buttons.spacing(4))
@@ -418,26 +452,34 @@ fn hover_actions<'a>(buttons: Row<'a, Message>, background: Color) -> Element<'a
     ]
     .height(Fill)
     .align_y(Center)
-    .padding(Padding::ZERO.right(4.0))
+    .padding(Padding::ZERO.right(inset))
     .into()
 }
 
-/// A 22px square button holding a 13px icon, as in the mockup's file list.
-fn icon_button<'a>(bytes: &'static [u8], message: Message) -> Button<'a, Message> {
-    // Pinned 4px from the top-left rather than centered: centering a 13px icon in 22px
-    // puts it at 4.5px, a half pixel, which smears its thin strokes across two pixel
+/// A small square button holding a row-size icon (24px around 15px). `on_selected_row`
+/// picks a hover color that still shows on the selected row's blue.
+fn icon_button<'a>(
+    bytes: &'static [u8],
+    message: Message,
+    on_selected_row: bool,
+) -> Button<'a, Message> {
+    // Pinned at a whole-pixel offset rather than centered: centering 15px in 24px puts
+    // the icon at 4.5px, a half pixel, which smears its thin strokes across two pixel
     // columns (the + looked dim). Half a pixel off-center isn't visible; blur is.
-    button(icon(bytes, 13.0, colors::TEXT_MUTED))
+    let before = ((layouts::ICON_BUTTON - icon_sizes::ROW) / 2.0).floor();
+    let after = layouts::ICON_BUTTON - icon_sizes::ROW - before;
+
+    button(icon(bytes, icon_sizes::ROW, colors::TEXT_MUTED))
         .on_press(message)
         .width(layouts::ICON_BUTTON)
         .height(layouts::ICON_BUTTON)
         .padding(Padding {
-            top: 4.0,
-            left: 4.0,
-            right: 5.0,
-            bottom: 5.0,
+            top: before,
+            left: before,
+            right: after,
+            bottom: after,
         })
-        .style(theme::icon_button)
+        .style(theme::icon_button(on_selected_row))
 }
 
 fn kind_color(kind: ChangeKind) -> Color {

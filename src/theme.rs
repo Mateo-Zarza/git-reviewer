@@ -15,6 +15,8 @@ pub mod colors {
     pub const TAG_BORDER: Color = color!(0x44464d);
     pub const HOVER: Color = color!(0x26272b);
     pub const SELECTED: Color = color!(0x2a3550);
+    /// A button hovered on top of a SELECTED row: the same blue, a step lighter.
+    pub const SELECTED_HOVER: Color = color!(0x3a4a70);
     pub const FOCUS: Color = color!(0x5b9bff);
     pub const TEXT: Color = color!(0xe6e6e9);
     pub const TEXT_MUTED: Color = color!(0xa1a3ab);
@@ -39,36 +41,53 @@ pub mod colors {
     pub const HUNK_TEXT: Color = color!(0x8fa6c8);
 }
 
+// Everything is 2px above the mockup's sizes (asked for 2026-11-21: easier to read on
+// a QHD monitor). The mockup's were 13 / 14 / 15 / 12 / 11 / 10.
 pub mod text_sizes {
-    pub const BODY: f32 = 13.0;
-    pub const TITLE: f32 = 14.0;
-    pub const BRANCH: f32 = 15.0;
-    pub const SMALL: f32 = 12.0;
-    pub const LABEL: f32 = 11.0;
-    pub const TAG: f32 = 10.0;
+    pub const BODY: f32 = 15.0;
+    pub const TITLE: f32 = 16.0;
+    pub const BRANCH: f32 = 17.0;
+    pub const SMALL: f32 = 14.0;
+    pub const LABEL: f32 = 13.0;
+    pub const TAG: f32 = 12.0;
+}
+
+/// UI icon sizes, also 2px above the mockup. Odd sizes put a 24-unit icon's centre lines
+/// on pixel centres, which keeps thin strokes sharp.
+pub mod icon_sizes {
+    /// Top bar buttons and the primary button.
+    pub const BUTTON: f32 = 16.0;
+    /// Sidebar branch icon and the file list's +/−/discard buttons.
+    pub const ROW: f32 = 15.0;
+    /// The repo header's chevron.
+    pub const CHEVRON: f32 = 14.0;
 }
 
 pub mod layouts {
     // Bars and panels
-    pub const TOP_BAR_HEIGHT: f32 = 44.0;
+    pub const TOP_BAR_HEIGHT: f32 = 48.0;
     pub const SIDEBAR_WIDTH: f32 = 260.0;
     pub const CHANGES_WIDTH: f32 = 280.0;
     // Buttons
-    pub const BUTTON_HEIGHT: f32 = 30.0;
-    pub const PRIMARY_BUTTON_HEIGHT: f32 = 32.0;
-    pub const ICON_BUTTON: f32 = 22.0;
+    pub const BUTTON_HEIGHT: f32 = 32.0;
+    pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;
+    pub const ICON_BUTTON: f32 = 24.0;
     /// File rows and section headers in the changes list.
-    pub const LIST_ROW_HEIGHT: f32 = 30.0;
-    /// Catppuccin's file icons are drawn on a 16px grid.
+    pub const LIST_ROW_HEIGHT: f32 = 32.0;
+    /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
+    /// 1px strokes, so they stay at 16 while the text around them grew.
     pub const FILE_ICON: f32 = 16.0;
+    // Commit box: three lines of BODY text plus its padding.
+    pub const COMMIT_BOX_HEIGHT: f32 = 80.0;
     // Diff
-    pub const LINE_NUMBER_WIDTH: f32 = 44.0;
-    pub const DIFF_LINE_HEIGHT: f32 = 20.0;
+    pub const LINE_NUMBER_WIDTH: f32 = 48.0;
+    pub const DIFF_LINE_HEIGHT: f32 = 22.0;
     pub const DIFF_SIGN_WIDTH: f32 = 16.0;
-    /// Advance width of one JetBrains Mono glyph (0.6em) at the diff's 12px. Every glyph
-    /// in a monospace font has it, so a line's width is `chars × this`.
-    pub const DIFF_CHAR_WIDTH: f32 = 7.2;
-    pub const DIFF_HEADER_HEIGHT: f32 = 44.0;
+    /// Advance width of one Fira Code glyph at the diff's text size: 1200 of its 1950
+    /// font units per em (≈0.615em, measured from the font file; not the 0.6 of most
+    /// monospace fonts). Every glyph has it, so a line's width is `chars × this`.
+    pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
+    pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
     // Padding
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
@@ -85,19 +104,29 @@ pub mod radii {
     pub const PILL: f32 = 9.0;
 }
 
+/// The same fonts VS Code uses: the system UI font for everything, and Fira Code (his
+/// editor font) for code. The system fonts can't be shipped (their licenses forbid it)
+/// and don't need to be: iced loads the installed system fonts at startup.
 pub mod fonts {
     use iced::{Font, font::Weight};
 
-    pub const UI: Font = Font::with_name("Inter");
+    /// Segoe UI on Windows; on macOS San Francisco, which the font database lists as
+    /// `.SF NS`; elsewhere the bundled Inter. Each has the 400 and 600 weights used here.
+    #[cfg(target_os = "windows")]
+    const UI_FAMILY: &str = "Segoe UI";
+    #[cfg(target_os = "macos")]
+    const UI_FAMILY: &str = ".SF NS";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    const UI_FAMILY: &str = "Inter";
+
+    pub const UI: Font = Font::with_name(UI_FAMILY);
     pub const UI_SEMIBOLD: Font = Font {
         weight: Weight::Semibold,
         ..UI
     };
-    pub const MONO: Font = Font::with_name("JetBrains Mono");
-    pub const MONO_MEDIUM: Font = Font {
-        weight: Weight::Medium,
-        ..MONO
-    };
+    /// Bundled (assets/fonts, OFL). Only for the diff, where columns must line up;
+    /// everything else uses UI, so rows never mix two fonts' vertical metrics.
+    pub const MONO: Font = Font::with_name("Fira Code");
 }
 
 pub mod icons {
@@ -246,23 +275,31 @@ pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// The small square +/− buttons in the file list. Hover uses PILL rather than HOVER
-/// because they sit on rows that already turn HOVER when the mouse is over them.
-pub fn icon_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: None,
-        text_color: colors::TEXT_MUTED,
-        border: Border {
-            radius: radii::TAG.into(),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    };
+/// The small square +/−/discard buttons in the file list. Their hover has to stand out
+/// from the row under them, which is itself highlighted: one step lighter than HOVER
+/// (PILL) on a plain row, one step lighter than SELECTED on the selected row.
+pub fn icon_button(on_selected_row: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let base = button::Style {
+            background: None,
+            text_color: colors::TEXT_MUTED,
+            border: Border {
+                radius: radii::TAG.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        };
+        let hover = if on_selected_row {
+            colors::SELECTED_HOVER
+        } else {
+            colors::PILL
+        };
 
-    match status {
-        button::Status::Active => base,
-        button::Status::Hovered | button::Status::Pressed => base.with_background(colors::PILL),
-        button::Status::Disabled => dimmed(base),
+        match status {
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
+            button::Status::Disabled => dimmed(base),
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use iced::widget::scrollable::Direction;
-use iced::widget::text::{IntoFragment, Wrapping};
+use iced::widget::text::{IntoFragment, Shaping, Wrapping};
 use iced::widget::{Text, column, container, responsive, row, rule, scrollable, space, text};
 use iced::{
     Alignment::Center, Color, Element, Fill, Padding, Pixels, alignment::Horizontal::Right,
@@ -78,7 +78,6 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a
     container(
         row![
             ellipsized_text(path)
-                .font(fonts::MONO)
                 .size(text_sizes::SMALL)
                 .wrapping(Wrapping::None),
             container(text(side).size(text_sizes::LABEL))
@@ -86,11 +85,9 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a
                 .style(theme::filled_tag),
             space().width(Fill),
             text(format!("+{added}"))
-                .font(fonts::MONO)
                 .size(text_sizes::SMALL)
                 .color(colors::ADDED),
             text(format!("−{removed}"))
-                .font(fonts::MONO)
                 .size(text_sizes::SMALL)
                 .color(colors::DANGER),
         ]
@@ -143,7 +140,7 @@ fn diff_line_view(line: &DiffLine, width: f32) -> Element<'_, Message> {
     let (old, new, sign, gutter_bg, line_bg, sign_color) = match line {
         DiffLine::Hunk(header) => {
             return container(
-                container(mono(expand_tabs(header)).color(colors::HUNK_TEXT))
+                container(mono(display_text(header)).color(colors::HUNK_TEXT))
                     .padding([2.0, HUNK_PADDING_X])
                     .width(width)
                     .style(|_| container::background(colors::HUNK_BG)),
@@ -196,20 +193,26 @@ fn diff_line_view(line: &DiffLine, width: f32) -> Element<'_, Message> {
                 .width(layouts::DIFF_SIGN_WIDTH),
         ])
         .style(move |_| container::background(gutter_bg)),
-        mono(expand_tabs(line.text())),
+        mono(display_text(line.text())),
     ])
     .width(width)
     .style(move |_| container::background(line_bg))
     .into()
 }
 
-/// Diff text: JetBrains Mono 12 on a fixed 20px line, never wrapped.
+/// Diff text: Fira Code on a fixed line height, never wrapped.
+///
+/// `Shaping::Advanced` is what turns on Fira Code's ligatures (`=>`, `->`, `!=` drawn as
+/// one symbol, as in VS Code). iced's default, `Auto`, shapes ASCII-only text with
+/// `Basic`, which skips them, and nearly all code is ASCII. A ligature keeps the width
+/// of the characters it replaces, so the line-width math is unaffected.
 fn mono<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
     text(content)
         .font(fonts::MONO)
         .size(text_sizes::SMALL)
         .line_height(Pixels(layouts::DIFF_LINE_HEIGHT))
         .wrapping(Wrapping::None)
+        .shaping(Shaping::Advanced)
 }
 
 /// Tabs as 4 spaces (VS Code's default), so they render predictably and the width math
@@ -219,5 +222,49 @@ fn expand_tabs(line: &str) -> Cow<'_, str> {
         Cow::Owned(line.replace('\t', "    "))
     } else {
         Cow::Borrowed(line)
+    }
+}
+
+/// A diff line as it's drawn: tabs expanded, and an invisible word joiner (U+2060)
+/// between every two adjacent ASCII punctuation characters.
+///
+/// The joiners make Fira Code's ligatures work for every operator. The text engine
+/// (cosmic-text) shapes each run between Unicode line-break opportunities separately,
+/// and there's one after `-` and `!`, so `->` and `!=` reached the font as two pieces
+/// and never combined (`=>` did). A word joiner forbids the break, so the operator is
+/// shaped as one. It's zero-width, so the width math is unchanged; checked by rendering
+/// a line of operators with and without joiners and comparing their ends.
+fn display_text(line: &str) -> String {
+    let line = expand_tabs(line);
+    let mut shown = String::with_capacity(line.len() + line.len() / 4);
+    let mut previous_is_punctuation = false;
+
+    for character in line.chars() {
+        let is_punctuation = character.is_ascii_punctuation();
+        if previous_is_punctuation && is_punctuation {
+            shown.push('\u{2060}');
+        }
+        shown.push(character);
+        previous_is_punctuation = is_punctuation;
+    }
+    shown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_joiners_go_between_adjacent_punctuation_only() {
+        assert_eq!(display_text("a -> b"), "a -\u{2060}> b");
+        assert_eq!(display_text("x != y"), "x !\u{2060}= y");
+        assert_eq!(display_text("<!--"), "<\u{2060}!\u{2060}-\u{2060}-");
+        assert_eq!(display_text("a - b"), "a - b");
+        assert_eq!(display_text("let x = 1;"), "let x = 1;");
+    }
+
+    #[test]
+    fn test_tabs_are_expanded_first() {
+        assert_eq!(display_text("\tx => y"), "    x =\u{2060}> y");
     }
 }
