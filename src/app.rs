@@ -1,6 +1,9 @@
 use crate::git::{
     ChangeKind, Diff, DiffLine, DiffSource, FileEntry, GitError, Repo, Status, Workspace, Worktree,
 };
+use crate::theme::layouts::GAP;
+use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use iced::widget::{rule, space};
 use iced::{
     Alignment::Center,
     Color, Element, Fill, Font, Padding, Task,
@@ -244,15 +247,54 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let top_bar = container(
+            row![
+                text("Git Reviewer")
+                    .font(fonts::UI_SEMIBOLD)
+                    .size(text_sizes::TITLE),
+                text(self.root.to_string_lossy())
+                    .font(fonts::MONO)
+                    .size(text_sizes::SMALL)
+                    .color(colors::TEXT_MUTED),
+                text(
+                    self.error
+                        .as_ref()
+                        .map(|e| e.to_string())
+                        .unwrap_or_default()
+                )
+                .color(colors::DANGER),
+                space().width(Fill),
+                button(text("Fetch all").height(Fill).center())
+                    .on_press(Message::FetchAll)
+                    .height(layouts::BUTTON_HEIGHT)
+                    .padding([0.0, 12.0])
+                    .style(theme::outline_button),
+                button(text("Refresh").height(Fill).center())
+                    .on_press(Message::Refresh)
+                    .height(layouts::BUTTON_HEIGHT)
+                    .padding([0.0, 12.0])
+                    .style(theme::outline_button),
+            ]
+            .spacing(12)
+            .align_y(Center),
+        )
+        .height(layouts::TOP_BAR_HEIGHT)
+        .padding([0.0, layouts::PANEL_PADDING_X])
+        .align_y(Center)
+        .style(|_| container::background(colors::SURFACE));
+
         let body: Element<'_, Message> = match &self.workspace {
             Err(err) => text(err.to_string()).into(),
-            Ok(workspace) => row![
-                scrollable(
-                    column(workspace.repos().iter().map(repo_view))
-                        .width(260)
-                        .spacing(10)
-                ),
-                container(status_view(
+            Ok(workspace) => {
+                let sidebar = container(scrollable(
+                    column(workspace.repos().iter().map(repo_view)).spacing(layouts::REPO_GAP),
+                ))
+                .width(layouts::SIDEBAR_WIDTH)
+                .height(Fill)
+                .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X])
+                .style(|_| container::background(colors::SIDEBAR));
+
+                let changes_panel = container(status_view(
                     &self.status,
                     &self.commit_message,
                     self.selected_repo().map(|r| r.name()),
@@ -260,29 +302,25 @@ impl App {
                     self.selected_worktree().is_some_and(|w| w.is_main()),
                     self.pending_removal,
                 ))
-                .width(280),
-                scrollable(diff_view(&self.diff)).width(Fill)
-            ]
-            .spacing(10)
-            .padding(10)
-            .into(),
+                .width(layouts::CHANGES_WIDTH)
+                .height(Fill)
+                .style(|_| container::background(colors::SURFACE));
+
+                let diff_panel = scrollable(diff_view(&self.diff)).width(Fill);
+
+                row![
+                    sidebar,
+                    rule::vertical(1).style(theme::divider),
+                    changes_panel,
+                    rule::vertical(1).style(theme::divider),
+                    diff_panel
+                ]
+                .height(Fill)
+                .into()
+            }
         };
 
-        column![
-            row![
-                button(text("Refresh")).on_press(Message::Refresh),
-                button(text("Fetch all")).on_press(Message::FetchAll),
-                text(
-                    self.error
-                        .as_ref()
-                        .map(|e| e.to_string())
-                        .unwrap_or_default()
-                )
-                .color(Color::from_rgb8(240, 133, 122)),
-            ],
-            body
-        ]
-        .into()
+        column![top_bar, rule::horizontal(1).style(theme::divider), body].into()
     }
 
     fn load_status(&mut self) {
@@ -375,15 +413,19 @@ fn status_view<'a>(
             let counts = status.upstream.as_ref().and_then(|u| u.counts);
 
             let action_button = match (staged_count, unstaged_count, counts) {
-                (1.., _, _) => button(text("Commit"))
+                (1.., _, _) => button(text("Commit").width(Fill).font(fonts::UI_SEMIBOLD))
                     .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
-                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => {
-                    button(text(format!("Sync changes ↑{ahead} ↓{behind}"))).on_press(Message::Sync)
-                }
+                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => button(
+                    text(format!("Sync changes ↑{ahead} ↓{behind}"))
+                        .width(Fill)
+                        .font(fonts::UI_SEMIBOLD),
+                )
+                .on_press(Message::Sync),
                 (0, 0, None) if status.branch.is_some() => {
-                    button(text("Publish Branch")).on_press(Message::Publish)
+                    button(text("Publish Branch").width(Fill).font(fonts::UI_SEMIBOLD))
+                        .on_press(Message::Publish)
                 }
-                _ => button(text("Commit")),
+                _ => button(text("Commit").width(Fill).font(fonts::UI_SEMIBOLD)),
             };
 
             let worktree_removable = !is_main_worktree;
@@ -404,11 +446,18 @@ fn status_view<'a>(
 
             let footer = match pending_removal {
                 None => row![
-                    button(text("Rm. worktree"))
-                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree))),
-                    button(text("Del. branch"))
-                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch))),
-                ],
+                    button(text("Rm. worktree").width(Fill))
+                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
+                        .height(layouts::BUTTON_HEIGHT)
+                        .width(Fill)
+                        .style(theme::danger_button),
+                    button(text("Del. branch").width(Fill))
+                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
+                        .height(layouts::BUTTON_HEIGHT)
+                        .width(Fill)
+                        .style(theme::danger_button),
+                ]
+                .spacing(layouts::GAP),
                 Some(removal) => row![
                     text(format!(
                         "Discard {} changes and remove?",
@@ -421,33 +470,35 @@ fn status_view<'a>(
 
             column![
                 row![
-                    text(branch).size(15).font(Font {
-                        weight: font::Weight::Semibold,
-                        ..Font::default()
-                    }),
+                    text(branch)
+                        .size(text_sizes::BRANCH)
+                        .font(fonts::UI_SEMIBOLD),
                     text(repo_name.unwrap_or_default())
-                        .size(13)
-                        .color(Color::from_rgb8(161, 163, 171)),
+                        .size(text_sizes::BRANCH)
+                        .color(colors::TEXT_MUTED),
                     text(upstream_branch)
-                        .size(12)
-                        .color(Color::from_rgb8(139, 142, 151)),
+                        .size(text_sizes::SMALL)
+                        .color(colors::TEXT_DIM),
                 ]
                 .spacing(8)
                 .align_y(Bottom),
                 text(ahead_behind_text)
-                    .size(11)
-                    .color(Color::from_rgb8(139, 142, 151)),
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_DIM),
                 text("COMMIT MESSAGE")
-                    .size(11)
-                    .color(Color::from_rgb8(161, 163, 171)),
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_MUTED),
                 text_editor(commit_message)
                     .placeholder("Message (Ctrl+Enter to commit)")
                     .on_action(Message::CommitMessageEdited)
                     .height(72),
-                action_button.width(Fill),
+                action_button
+                    .style(theme::primary_button)
+                    .height(layouts::PRIMARY_BUTTON_HEIGHT)
+                    .width(Fill),
                 text(format!("STAGED CHANGES · {staged_count}"))
-                    .size(11)
-                    .color(Color::from_rgb8(161, 163, 171)),
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_MUTED),
                 column(
                     status
                         .files
@@ -455,8 +506,8 @@ fn status_view<'a>(
                         .filter_map(|file| file.staged.map(|kind| file_view(file, kind, true)))
                 ),
                 text(format!("CHANGES · {unstaged_count}"))
-                    .size(11)
-                    .color(Color::from_rgb8(161, 163, 171)),
+                    .size(text_sizes::LABEL)
+                    .color(colors::TEXT_MUTED),
                 column(
                     status
                         .files
@@ -493,26 +544,17 @@ fn file_view(file: &FileEntry, kind: ChangeKind, staged: bool) -> Element<'_, Me
                 row![
                     container(
                         text(kind.to_code().to_string())
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::MONOSPACE
-                            })
+                            .font(fonts::MONO_MEDIUM)
                             .color(kind_color(kind))
                             .width(12)
-                    )
-                    .padding(Padding {
-                        top: 6.0,
-                        bottom: 0.0,
-                        left: 0.0,
-                        right: 0.0
-                    }),
+                    ),
                     text(name),
-                    text(dir).size(12).color(Color::from_rgb8(139, 142, 151))
+                    text(dir).size(text_sizes::SMALL).color(colors::TEXT_DIM)
                 ]
                 .width(Fill)
                 .spacing(8)
                 .align_y(Center),
-                button_sign.width(22).style(button::text)
+                button_sign.width(layouts::GAP).style(button::text)
             ]
             .align_y(Center)
         )
@@ -537,8 +579,8 @@ fn diff_line_view(line: &DiffLine) -> Element<'_, Message> {
     let (content, bg, fg, old, new, sign, sg) = match line {
         DiffLine::Hunk(text) => (
             text.as_str(),
-            Color::from_rgb8(34, 37, 44),
-            Some(Color::from_rgb8(143, 166, 200)),
+            colors::HUNK_BG,
+            Some(colors::HUNK_TEXT),
             None,
             None,
             " ",
@@ -546,21 +588,21 @@ fn diff_line_view(line: &DiffLine) -> Element<'_, Message> {
         ),
         DiffLine::Added { new, text } => (
             text.as_str(),
-            Color::from_rgba8(124, 196, 138, 0.13),
+            colors::ADDED_TINT,
             None,
             None,
             Some(*new),
             "+",
-            Some(Color::from_rgb8(124, 196, 138)),
+            Some(colors::ADDED),
         ),
         DiffLine::Removed { old, text } => (
             text.as_str(),
-            Color::from_rgba8(240, 133, 122, 0.13),
+            colors::REMOVED_TINT,
             None,
             Some(*old),
             None,
             "-",
-            Some(Color::from_rgb8(240, 133, 122)),
+            Some(colors::DELETED),
         ),
         DiffLine::Context { old, new, text } => (
             text.as_str(),
@@ -579,15 +621,15 @@ fn diff_line_view(line: &DiffLine) -> Element<'_, Message> {
     container(
         row![
             text(old_label)
-                .width(44)
-                .font(Font::MONOSPACE)
+                .width(layouts::LINE_NUMBER_WIDTH)
+                .font(fonts::MONO)
                 .align_x(Right),
             text(new_label)
-                .width(44)
-                .font(Font::MONOSPACE)
+                .width(layouts::LINE_NUMBER_WIDTH)
+                .font(fonts::MONO)
                 .align_x(Right),
-            text(sign).font(Font::MONOSPACE).color_maybe(sg),
-            text(content).font(Font::MONOSPACE).color_maybe(fg)
+            text(sign).font(fonts::MONO).color_maybe(sg),
+            text(content).font(fonts::MONO).color_maybe(fg)
         ]
         .spacing(8),
     )
@@ -598,12 +640,12 @@ fn diff_line_view(line: &DiffLine) -> Element<'_, Message> {
 
 fn kind_color(kind: ChangeKind) -> Color {
     match kind {
-        ChangeKind::Added => Color::from_rgb8(124, 196, 138),
-        ChangeKind::Renamed => Color::from_rgb8(111, 179, 232),
-        ChangeKind::Copied => Color::from_rgb8(124, 196, 138),
-        ChangeKind::Modified => Color::from_rgb8(229, 181, 103),
-        ChangeKind::Deleted => Color::from_rgb8(240, 133, 122),
-        ChangeKind::TypeChanged => Color::from_rgb8(229, 181, 103),
-        ChangeKind::Untracked => Color::from_rgb8(124, 196, 138),
+        ChangeKind::Added => colors::ADDED,
+        ChangeKind::Renamed => colors::RENAMED,
+        ChangeKind::Copied => colors::ADDED,
+        ChangeKind::Modified => colors::MODIFIED,
+        ChangeKind::Deleted => colors::DANGER,
+        ChangeKind::TypeChanged => colors::MODIFIED,
+        ChangeKind::Untracked => colors::ADDED,
     }
 }
