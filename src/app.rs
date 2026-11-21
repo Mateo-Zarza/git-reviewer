@@ -14,7 +14,8 @@ use std::path::{PathBuf, absolute};
 use iced::widget::operation;
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::{Container, button, column, container, row, rule, space, text, text_editor};
-use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task};
+use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task, window};
+use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
@@ -34,6 +35,8 @@ pub enum Message {
     ChooseRoot,
     /// The picker closed: the chosen folder, or `None` if it was cancelled.
     RootChosen(Option<PathBuf>),
+    /// A frame passed while a Sync/Publish runs; only redraws the spinning icon.
+    Tick,
     Stage(String),
     Unstage(String),
     StageAll,
@@ -66,8 +69,18 @@ impl Removal {
     }
 }
 
+/// A push/pull running in the background, which the primary button shows as busy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RemoteOp {
+    Sync,
+    Publish,
+}
+
 pub struct App {
     workspace: Result<Workspace, AppError>,
+    /// The Sync or Publish in flight and when it started (the spinner's angle comes
+    /// from the elapsed time). `None` when idle.
+    remote_op: Option<(RemoteOp, Instant)>,
     selected_worktree_path: Option<PathBuf>,
     selected_file: Option<(String, DiffSource)>,
     status: Option<Result<Status, GitError>>,
@@ -129,6 +142,7 @@ impl App {
 
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
+            remote_op: None,
             selected_worktree_path: None,
             selected_file: None,
             status: None,
@@ -299,28 +313,36 @@ impl App {
                 self.workspace = self.scan();
                 self.load_status();
             }
-            Message::Sync => {
+            // One push/pull at a time: the button is disabled while one runs, and these
+            // guards also cover a message that was already queued.
+            Message::Sync if self.remote_op.is_none() => {
                 self.error = None;
                 if let Some(worktree) = self.selected_worktree().cloned() {
+                    self.remote_op = Some((RemoteOp::Sync, Instant::now()));
                     return Task::perform(async move { worktree.sync() }, Message::Synced);
                 }
             }
             Message::Synced(result) => {
+                self.remote_op = None;
                 self.error = result.err().map(AppError::from);
                 self.load_status();
                 self.load_diff();
             }
-            Message::Publish => {
+            Message::Publish if self.remote_op.is_none() => {
                 self.error = None;
                 if let Some(worktree) = self.selected_worktree().cloned() {
+                    self.remote_op = Some((RemoteOp::Publish, Instant::now()));
                     return Task::perform(async move { worktree.publish() }, Message::Published);
                 }
             }
             Message::Published(result) => {
+                self.remote_op = None;
                 self.error = result.err().map(AppError::from);
                 self.load_status();
                 self.load_diff();
             }
+            Message::Sync | Message::Publish => {} // one is already running
+            Message::Tick => {}                    // nothing to update; the redraw is the point
             Message::RemoveWorktree { force } => {
                 self.pending_removal = None;
                 if let (Some(repo), Some(path)) =
@@ -393,7 +415,14 @@ impl App {
         // running watcher instead of restarting it on every refresh.
         paths.sort();
 
-        watch::subscription(paths)
+        // A message per frame only while a Sync/Publish runs, to animate its icon;
+        // idle, the app draws nothing.
+        let spinner = match self.remote_op {
+            Some(_) => window::frames().map(|_| Message::Tick),
+            None => Subscription::none(),
+        };
+
+        Subscription::batch([watch::subscription(paths), spinner])
     }
 
     pub fn view(&self) -> Element<'_, Message> {

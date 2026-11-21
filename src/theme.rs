@@ -23,7 +23,8 @@ pub mod colors {
     pub const PILL: Color = color!(0x3a3b41);
     pub const SCROLLBAR_HOVER: Color = color!(0x4a4c53);
     pub const PRIMARY: Color = color!(0x3d7be0);
-    pub const ON_PRIMARY: Color = color!(0xffffff);
+    /// Text and icons on PRIMARY buttons: the app's dark background, not white.
+    pub const ON_PRIMARY: Color = BACKGROUND;
     pub const DANGER: Color = color!(0xf0857a);
     pub const DANGER_BORDER: Color = color!(0x5a3a37);
     pub const MODIFIED: Color = color!(0xe5b567);
@@ -102,6 +103,9 @@ pub mod icons {
     };
 
     pub const DOWNLOAD: &[u8] = include_bytes!("../assets/icons/arrow-down-to-line.svg");
+    pub const UPLOAD: &[u8] = include_bytes!("../assets/icons/arrow-up-from-line.svg");
+    pub const CHECK: &[u8] = include_bytes!("../assets/icons/check.svg");
+    pub const SYNC: &[u8] = include_bytes!("../assets/icons/sync.svg");
     pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
     pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
@@ -174,7 +178,13 @@ pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
     };
 
     match status {
-        button::Status::Disabled => dimmed(base),
+        // Not `dimmed`: half-faded dark text on a half-faded blue is unreadable. A
+        // neutral grey button reads as "off" and stays legible.
+        button::Status::Disabled => button::Style {
+            background: Some(colors::PILL.into()),
+            text_color: colors::TEXT_DIM,
+            ..base
+        },
         _ => base,
     }
 }

@@ -10,7 +10,11 @@ use iced::{
 };
 use iced_palace::widget::ellipsized_text;
 
-use super::{App, Message, Removal, empty_state};
+use std::f32::consts::TAU;
+
+use iced::{Radians, Rotation};
+
+use super::{App, Message, RemoteOp, Removal, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
@@ -98,33 +102,62 @@ impl App {
         let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
         let counts = status.upstream.as_ref().and_then(|u| u.counts);
         let can_commit = staged_count > 0 && !self.commit_message.is_empty();
-        let label = |label: &'static str| -> Element<'a, Message> {
-            text(label).font(fonts::UI_SEMIBOLD).into()
-        };
 
-        // What the primary button says and does, VS Code-style: Commit while there are
+        // What the primary button shows and does, VS Code-style: Commit while there are
         // changes, then Sync while ahead/behind the upstream, Publish if there's none.
-        let (content, on_press): (Element<'a, Message>, Option<Message>) =
-            match (staged_count, unstaged_count, counts) {
-                (1.., _, _) => (label("Commit"), can_commit.then_some(Message::Commit)),
+        // While a Sync/Publish runs it stays on that action, disabled, icon spinning.
+        let (icon_bytes, title, counts_text, on_press) = match self.remote_op {
+            Some((RemoteOp::Sync, _)) => (Some(icons::SYNC), "Sync changes", None, None),
+            Some((RemoteOp::Publish, _)) => (Some(icons::SYNC), "Publish", None, None),
+            None => match (staged_count, unstaged_count, counts) {
+                (1.., _, _) => (
+                    Some(icons::CHECK),
+                    "Commit",
+                    None,
+                    can_commit.then_some(Message::Commit),
+                ),
                 (0, 0, Some((ahead, behind))) if ahead + behind > 0 => (
-                    row![
-                        label("Sync changes"),
-                        text(format!("↑{ahead} ↓{behind}"))
-                            .font(fonts::MONO_MEDIUM)
-                            .size(text_sizes::SMALL),
-                    ]
-                    .spacing(10)
-                    .align_y(Center)
-                    .into(),
+                    Some(icons::SYNC),
+                    "Sync changes",
+                    Some(format!("↑{ahead} ↓{behind}")),
                     Some(Message::Sync),
                 ),
                 (0, 0, None) if status.branch.is_some() => {
-                    (label("Publish"), Some(Message::Publish))
+                    (Some(icons::UPLOAD), "Publish", None, Some(Message::Publish))
                 }
-                (0, 1.., _) => (label("Commit"), None),
-                _ => (label("No changes"), None),
-            };
+                (0, 1.., _) => (Some(icons::CHECK), "Commit", None, None),
+                _ => (None, "No changes", None, None),
+            },
+        };
+
+        // The icon isn't text, so the button style's text color doesn't reach it; it gets
+        // the same color as the label by hand (see `theme::primary_button`).
+        let icon_color = if on_press.is_some() {
+            colors::ON_PRIMARY
+        } else {
+            colors::TEXT_DIM
+        };
+        // One turn per second since the operation started; 0 when idle.
+        let angle = self
+            .remote_op
+            .map(|(_, started)| started.elapsed().as_secs_f32() * TAU)
+            .unwrap_or(0.0);
+
+        // Pushed piece by piece: a `None` child in `row!` would still take a gap.
+        let mut content = row![].spacing(layouts::GAP).align_y(Center);
+        if let Some(bytes) = icon_bytes {
+            content = content.push(
+                icon(bytes, 14.0, icon_color).rotation(Rotation::Floating(Radians(angle))),
+            );
+        }
+        content = content.push(text(title).font(fonts::UI_SEMIBOLD));
+        if let Some(counts_text) = counts_text {
+            content = content.push(
+                text(counts_text)
+                    .font(fonts::MONO_MEDIUM)
+                    .size(text_sizes::SMALL),
+            );
+        }
 
         container(
             column![
