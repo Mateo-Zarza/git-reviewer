@@ -1,14 +1,13 @@
 use crate::git::{
     ChangeKind, Diff, DiffLine, DiffSource, FileEntry, GitError, Repo, Status, Workspace, Worktree,
 };
-use crate::theme::layouts::GAP;
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use iced::Padding;
 use iced::widget::{rule, space};
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Font, Padding, Task,
+    Color, Element, Fill, Task,
     alignment::{Horizontal::Right, Vertical::Bottom},
-    font,
     widget::{button, column, container, row, scrollable, text, text_editor},
 };
 use std::{env::args, path::PathBuf};
@@ -411,23 +410,26 @@ fn status_view<'a>(
                 .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"))
                 .unwrap_or_default();
             let counts = status.upstream.as_ref().and_then(|u| u.counts);
-
-            let action_button = match (staged_count, unstaged_count, counts) {
-                (1.., _, _) => button(text("Commit").width(Fill).font(fonts::UI_SEMIBOLD))
-                    .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
-                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => button(
-                    text(format!("Sync changes ↑{ahead} ↓{behind}"))
-                        .width(Fill)
-                        .font(fonts::UI_SEMIBOLD),
-                )
-                .on_press(Message::Sync),
-                (0, 0, None) if status.branch.is_some() => {
-                    button(text("Publish Branch").width(Fill).font(fonts::UI_SEMIBOLD))
-                        .on_press(Message::Publish)
-                }
-                _ => button(text("Commit").width(Fill).font(fonts::UI_SEMIBOLD)),
+            let primary_label = |label: String| {
+                text(label)
+                    .width(Fill)
+                    .height(Fill)
+                    .center()
+                    .font(fonts::UI_SEMIBOLD)
             };
-
+            let action_button = match (staged_count, unstaged_count, counts) {
+                (1.., _, _) => button(primary_label("Commit".into()))
+                    .on_press_maybe((!commit_message.is_empty()).then_some(Message::Commit)),
+                (0, 0, Some((ahead, behind))) if ahead + behind > 0 => {
+                    button(primary_label(format!("Sync changes ↑{ahead} ↓{behind}")))
+                        .on_press(Message::Sync)
+                }
+                (0, 0, None) if status.branch.is_some() => {
+                    button(primary_label("Publish".into())).on_press(Message::Publish)
+                }
+                (0, 1.., _) => button(primary_label("Commit".into())),
+                _ => button(primary_label("No changes".into())),
+            };
             let worktree_removable = !is_main_worktree;
             let branch_deletable = worktree_removable
                 && status.branch.is_some()
@@ -435,7 +437,6 @@ fn status_view<'a>(
                     .as_ref()
                     .is_none_or(|(_, (ahead, _))| *ahead == 0);
             let dirty = !status.files.is_empty();
-
             let request = |removal: Removal| {
                 if dirty {
                     Message::ConfirmRemoval(removal)
@@ -444,31 +445,7 @@ fn status_view<'a>(
                 }
             };
 
-            let footer = match pending_removal {
-                None => row![
-                    button(text("Rm. worktree").width(Fill))
-                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
-                        .height(layouts::BUTTON_HEIGHT)
-                        .width(Fill)
-                        .style(theme::danger_button),
-                    button(text("Del. branch").width(Fill))
-                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
-                        .height(layouts::BUTTON_HEIGHT)
-                        .width(Fill)
-                        .style(theme::danger_button),
-                ]
-                .spacing(layouts::GAP),
-                Some(removal) => row![
-                    text(format!(
-                        "Discard {} changes and remove?",
-                        status.files.len()
-                    )),
-                    button(text("Remove")).on_press(removal.message(true)),
-                    button(text("Cancel")).on_press(Message::CancelRemoval),
-                ],
-            };
-
-            column![
+            let header: Element<'_, Message> = column![
                 row![
                     text(branch)
                         .size(text_sizes::BRANCH)
@@ -480,41 +457,109 @@ fn status_view<'a>(
                         .size(text_sizes::SMALL)
                         .color(colors::TEXT_DIM),
                 ]
-                .spacing(8)
+                .spacing(layouts::GAP)
                 .align_y(Bottom),
-                text(ahead_behind_text)
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_DIM),
-                text("COMMIT MESSAGE")
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_MUTED),
-                text_editor(commit_message)
-                    .placeholder("Message (Ctrl+Enter to commit)")
-                    .on_action(Message::CommitMessageEdited)
-                    .height(72),
-                action_button
-                    .style(theme::primary_button)
-                    .height(layouts::PRIMARY_BUTTON_HEIGHT)
-                    .width(Fill),
-                text(format!("STAGED CHANGES · {staged_count}"))
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_MUTED),
-                column(
-                    status
-                        .files
-                        .iter()
-                        .filter_map(|file| file.staged.map(|kind| file_view(file, kind, true)))
-                ),
-                text(format!("CHANGES · {unstaged_count}"))
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_MUTED),
-                column(
-                    status
-                        .files
-                        .iter()
-                        .filter_map(|file| file.unstaged.map(|kind| file_view(file, kind, false)))
-                ),
-                footer
+                (!ahead_behind_text.is_empty()).then(|| {
+                    text(ahead_behind_text)
+                        .size(text_sizes::LABEL)
+                        .color(colors::TEXT_DIM)
+                }),
+            ]
+            .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
+            .into();
+
+            let commit_section: Element<'_, Message> = container(
+                column![
+                    text("COMMIT MESSAGE")
+                        .size(text_sizes::LABEL)
+                        .color(colors::TEXT_MUTED)
+                        .font(fonts::UI_SEMIBOLD),
+                    text_editor(commit_message)
+                        .placeholder("Message (Ctrl+Enter to commit)")
+                        .on_action(Message::CommitMessageEdited)
+                        .height(72),
+                    action_button
+                        .style(theme::primary_button)
+                        .height(layouts::PRIMARY_BUTTON_HEIGHT)
+                        .width(Fill),
+                ]
+                .spacing(layouts::GAP),
+            )
+            .padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X])
+            .into();
+
+            let file_list: Element<'_, Message> = container(
+                column![
+                    column![
+                        text(format!("STAGED CHANGES · {staged_count}"))
+                            .size(text_sizes::LABEL)
+                            .color(colors::TEXT_MUTED),
+                        column(status.files.iter().filter_map(|file| {
+                            file.staged.map(|kind| file_view(file, kind, true))
+                        })),
+                    ],
+                    column![
+                        text(format!("CHANGES · {unstaged_count}"))
+                            .size(text_sizes::LABEL)
+                            .color(colors::TEXT_MUTED),
+                        column(status.files.iter().filter_map(|file| {
+                            file.unstaged.map(|kind| file_view(file, kind, false))
+                        })),
+                    ]
+                ]
+                .spacing(layouts::SECTION_GAP),
+            )
+            .padding(layouts::GAP)
+            .into();
+
+            let footer: Element<'_, Message> = match pending_removal {
+                None => row![
+                    button(text("Rm. worktree").width(Fill).height(Fill).center())
+                        .on_press_maybe(worktree_removable.then_some(request(Removal::Worktree)))
+                        .height(layouts::BUTTON_HEIGHT)
+                        .width(Fill)
+                        .style(theme::danger_button),
+                    button(text("Del. branch").width(Fill).height(Fill).center())
+                        .on_press_maybe(branch_deletable.then_some(request(Removal::Branch)))
+                        .height(layouts::BUTTON_HEIGHT)
+                        .width(Fill)
+                        .style(theme::danger_button),
+                ]
+                .spacing(layouts::GAP)
+                .into(),
+                Some(removal) => column![
+                    text(format!(
+                        "Discard {} changes and remove?",
+                        status.files.len()
+                    ))
+                    .width(Fill)
+                    .center(),
+                    row![
+                        button(text("Remove").width(Fill).height(Fill).center())
+                            .on_press(removal.message(true))
+                            .style(theme::danger_button)
+                            .height(layouts::BUTTON_HEIGHT)
+                            .width(Fill),
+                        button(text("Cancel").width(Fill).height(Fill).center())
+                            .on_press(Message::CancelRemoval)
+                            .style(theme::outline_button)
+                            .height(layouts::BUTTON_HEIGHT)
+                            .width(Fill),
+                    ]
+                    .spacing(layouts::GAP)
+                ]
+                .spacing(layouts::GAP)
+                .into(),
+            };
+
+            column![
+                header,
+                rule::horizontal(1).style(theme::divider),
+                commit_section,
+                rule::horizontal(1).style(theme::divider),
+                scrollable(file_list).height(Fill),
+                rule::horizontal(1).style(theme::divider),
+                container(footer).padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X])
             ]
             .into()
         }
