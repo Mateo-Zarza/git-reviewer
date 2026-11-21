@@ -68,7 +68,6 @@ pub mod layouts {
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
     pub const ROW_PADDING_X: f32 = 8.0;
-    pub const ROW_PADDING_Y: f32 = 5.0;
     // Gaps
     pub const GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 10.0;
@@ -85,10 +84,6 @@ pub mod fonts {
     use iced::{Font, font::Weight};
 
     pub const UI: Font = Font::with_name("Inter");
-    pub const UI_MEDIUM: Font = Font {
-        weight: Weight::Medium,
-        ..UI
-    };
     pub const UI_SEMIBOLD: Font = Font {
         weight: Weight::Semibold,
         ..UI

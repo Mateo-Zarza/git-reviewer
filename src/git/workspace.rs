@@ -6,7 +6,6 @@ use std::{
 use crate::git::{GitError, Repo, Worktree};
 
 pub struct Workspace {
-    root: PathBuf,
     repos: Vec<Repo>,
 }
 
@@ -34,7 +33,7 @@ impl Workspace {
 
         repos.sort_by(|a, b| a.name().cmp(b.name()));
 
-        Ok(Workspace { root, repos })
+        Ok(Workspace { repos })
     }
 
     pub fn find_worktree(&self, path: &Path) -> Option<&Worktree> {
@@ -57,10 +56,6 @@ impl Workspace {
                 .iter()
                 .any(|worktree| worktree.path() == worktree_path)
         })
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn repos(&self) -> &[Repo] {
