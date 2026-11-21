@@ -1,15 +1,19 @@
 use crate::git::{
     ChangeKind, Diff, DiffLine, DiffSource, FileEntry, GitError, Repo, Status, Workspace, Worktree,
 };
+use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
 use iced::Padding;
+use iced::widget::text::Wrapping;
 use iced::widget::{rule, space};
+use iced_palace::widget::ellipsized_text;
 use iced::{
     Alignment::Center,
     Color, Element, Fill, Task,
     alignment::{Horizontal::Right, Vertical::Bottom},
     widget::{button, column, container, row, scrollable, text, text_editor},
 };
+use std::path::Path;
 use std::{env::args, path::PathBuf};
 
 #[derive(Debug, Clone)]
@@ -263,16 +267,26 @@ impl App {
                 )
                 .color(colors::DANGER),
                 space().width(Fill),
-                button(text("Fetch all").height(Fill).center())
-                    .on_press(Message::FetchAll)
-                    .height(layouts::BUTTON_HEIGHT)
-                    .padding([0.0, 12.0])
-                    .style(theme::outline_button),
-                button(text("Refresh").height(Fill).center())
-                    .on_press(Message::Refresh)
-                    .height(layouts::BUTTON_HEIGHT)
-                    .padding([0.0, 12.0])
-                    .style(theme::outline_button),
+                button(
+                    row![icon(icons::DOWNLOAD, 14.0, colors::TEXT), text("Fetch all")]
+                        .spacing(6)
+                        .height(Fill)
+                        .align_y(Center)
+                )
+                .on_press(Message::FetchAll)
+                .height(layouts::BUTTON_HEIGHT)
+                .padding([0.0, 12.0])
+                .style(theme::outline_button),
+                button(
+                    row![icon(icons::ROTATE_CW, 14.0, colors::TEXT), text("Refresh")]
+                        .spacing(6)
+                        .height(Fill)
+                        .align_y(Center)
+                )
+                .on_press(Message::Refresh)
+                .height(layouts::BUTTON_HEIGHT)
+                .padding([0.0, 12.0])
+                .style(theme::outline_button),
             ]
             .spacing(12)
             .align_y(Center),
@@ -286,7 +300,20 @@ impl App {
             Err(err) => text(err.to_string()).into(),
             Ok(workspace) => {
                 let sidebar = container(scrollable(
-                    column(workspace.repos().iter().map(repo_view)).spacing(layouts::REPO_GAP),
+                    column![
+                        container(
+                            text(format!("REPOSITORIES · {}", workspace.repos().len()))
+                                .size(text_sizes::LABEL)
+                                .font(fonts::UI_SEMIBOLD)
+                                .color(colors::TEXT_MUTED),
+                        )
+                        .padding([0.0, 8.0]),
+                        column(workspace.repos().iter().map(|repo| {
+                            repo_view(repo, self.selected_worktree_path.as_deref())
+                        }))
+                        .spacing(layouts::REPO_GAP),
+                    ]
+                    .spacing(layouts::REPO_GAP),
                 ))
                 .width(layouts::SIDEBAR_WIDTH)
                 .height(Fill)
@@ -363,24 +390,61 @@ impl App {
     }
 }
 
-fn repo_view(repo: &Repo) -> Element<'_, Message> {
+fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message> {
+    let count = repo.worktrees().len();
+    let count_label = if count == 1 {
+        "1 worktree".to_string()
+    } else {
+        format!("{count} worktrees")
+    };
+
     column![
-        text(repo.name()),
-        column(repo.worktrees().iter().map(worktree_view))
+        row![
+            icon(icons::CHEVRON_DOWN, 12.0, colors::TEXT_MUTED),
+            text(repo.name()).font(fonts::UI_SEMIBOLD),
+            text(count_label)
+                .size(text_sizes::SMALL)
+                .color(colors::TEXT_DIM),
+        ]
+        .spacing(6)
+        .align_y(Center)
+        .padding([2.0, 8.0]),
+        column(
+            repo.worktrees()
+                .iter()
+                .map(|wt| worktree_view(wt, selected))
+        )
+        .spacing(2),
     ]
+    .spacing(2)
     .into()
 }
 
-fn worktree_view(worktree: &Worktree) -> Element<'_, Message> {
-    let branch = worktree.branch().unwrap_or("(detached)");
-    let marker = if worktree.is_main() {
-        " [main checkout]"
-    } else {
-        ""
-    };
-    button(text(format!("{branch}{marker}")))
-        .on_press(Message::WorktreeSelected(worktree.path().to_path_buf()))
-        .into()
+fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element<'a, Message> {
+    let label = worktree.branch().unwrap_or(&worktree.head()[..7]);
+    let is_selected = selected == Some(worktree.path());
+    let main_tag = worktree.is_main().then(|| {
+        container(text("main").size(text_sizes::TAG))
+            .padding([1.0, 5.0])
+            .style(theme::tag(colors::TAG_BORDER, colors::TEXT_MUTED))
+    });
+
+    button(
+        row![
+            icon(icons::GIT_BRANCH, 13.0, colors::TEXT_MUTED),
+            ellipsized_text(label)
+                .wrapping(Wrapping::None)
+                .width(Fill),
+            main_tag,
+        ]
+        .spacing(layouts::GAP)
+        .align_y(Center),
+    )
+    .on_press(Message::WorktreeSelected(worktree.path().to_path_buf()))
+    .width(Fill)
+    .padding(Padding::from([6.0, 8.0]).left(26.0))
+    .style(theme::list_row(is_selected))
+    .into()
 }
 
 fn status_view<'a>(
@@ -447,15 +511,18 @@ fn status_view<'a>(
 
             let header: Element<'_, Message> = column![
                 row![
-                    text(branch)
+                    ellipsized_text(branch)
                         .size(text_sizes::BRANCH)
-                        .font(fonts::UI_SEMIBOLD),
-                    text(repo_name.unwrap_or_default())
+                        .font(fonts::UI_SEMIBOLD)
+                        .wrapping(Wrapping::None),
+                    ellipsized_text(repo_name.unwrap_or_default())
                         .size(text_sizes::BRANCH)
-                        .color(colors::TEXT_MUTED),
-                    text(upstream_branch)
+                        .color(colors::TEXT_MUTED)
+                        .wrapping(Wrapping::None),
+                    ellipsized_text(upstream_branch)
                         .size(text_sizes::SMALL)
-                        .color(colors::TEXT_DIM),
+                        .color(colors::TEXT_DIM)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(layouts::GAP)
                 .align_y(Bottom),

@@ -1,7 +1,7 @@
 use iced::{
-    Border, Theme,
+    Border, Color, Theme,
     theme::Palette,
-    widget::{button, rule},
+    widget::{button, container, rule},
 };
 
 pub mod colors {
@@ -95,6 +95,27 @@ pub mod fonts {
     };
 }
 
+pub mod icons {
+    use iced::{
+        Color,
+        widget::{Svg, svg},
+    };
+
+    pub const DOWNLOAD: &[u8] = include_bytes!("../assets/icons/arrow-down-to-line.svg");
+    pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
+    pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
+    pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
+    pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
+    pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
+
+    pub fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> Svg<'a> {
+        svg(svg::Handle::from_memory(bytes))
+            .width(size)
+            .height(size)
+            .style(move |_, _| svg::Style { color: Some(color) })
+    }
+}
+
 pub fn divider(theme: &Theme) -> rule::Style {
     rule::Style {
         color: colors::BORDER,
@@ -167,6 +188,46 @@ fn dimmed(style: button::Style) -> button::Style {
         },
         background: style.background.map(|bg| bg.scale_alpha(0.5)),
         ..style
+    }
+}
+
+pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let base = button::Style {
+            background: if selected {
+                Some(colors::SELECTED.into())
+            } else {
+                None
+            },
+            text_color: colors::TEXT,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: radii::CONTROL.into(),
+            },
+            ..button::Style::default()
+        };
+
+        match status {
+            _ if selected => base,
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => {
+                base.with_background(colors::HOVER)
+            }
+            button::Status::Disabled => dimmed(base),
+        }
+    }
+}
+
+pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        text_color: Some(text),
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: radii::TAG.into(),
+        },
+        ..container::Style::default()
     }
 }
 
