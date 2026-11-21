@@ -5,13 +5,14 @@
 mod changes;
 mod diff;
 mod sidebar;
+mod watch;
 
 use std::{env::args, path::PathBuf};
 
 use iced::widget::operation;
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::{Container, button, column, container, row, rule, space, text, text_editor};
-use iced::{Alignment::Center, Color, Element, Fill, Task};
+use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task};
 
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
 use crate::theme::icons::{self, icon};
@@ -23,6 +24,9 @@ pub enum Message {
     WorktreeSelected(PathBuf),
     FileSelected { path: String, source: DiffSource },
     Refresh,
+    /// Something changed on disk in a worktree (from the file watcher).
+    FilesChanged,
+    WatchFailed(String),
     Stage(String),
     Unstage(String),
     StageAll,
@@ -95,10 +99,15 @@ impl App {
                 self.selected_file = None;
                 self.load_status();
             }
-            Message::Refresh => {
+            Message::Refresh | Message::FilesChanged => {
                 self.workspace = Workspace::scan(&self.root);
                 self.load_status();
                 self.retarget_selected_file();
+            }
+            Message::WatchFailed(reason) => {
+                self.error = Some(GitError::CommandFailed(format!(
+                    "Auto-refresh unavailable ({reason}); use Refresh"
+                )));
             }
             Message::FileSelected { path, source } => {
                 self.selected_file = Some((path, source));
@@ -251,6 +260,26 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Watches every worktree's folder so the app refreshes itself after edits or
+    /// terminal git commands.
+    pub fn subscription(&self) -> Subscription<Message> {
+        let Ok(workspace) = &self.workspace else {
+            return Subscription::none();
+        };
+
+        let mut paths: Vec<PathBuf> = workspace
+            .repos()
+            .iter()
+            .flat_map(|repo| repo.worktrees())
+            .map(|worktree| worktree.path().to_path_buf())
+            .collect();
+        // Sorted so the same worktrees always hash the same, and iced keeps the
+        // running watcher instead of restarting it on every refresh.
+        paths.sort();
+
+        watch::subscription(paths)
     }
 
     pub fn view(&self) -> Element<'_, Message> {

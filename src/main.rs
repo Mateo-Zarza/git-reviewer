@@ -9,6 +9,7 @@ mod theme;
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .title("Git Reviewer")
+        .subscription(App::subscription)
         .settings(Settings {
             default_text_size: text_sizes::BODY.into(),
             ..Settings::default()
