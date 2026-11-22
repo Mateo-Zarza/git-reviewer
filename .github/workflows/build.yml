@@ -3,7 +3,8 @@
 #
 # Reusable: it only runs when another workflow calls it (`uses:`), so CI (ci.yml) and
 # releases (release.yml) share exactly this build. release.yml collects the files with
-# actions/download-artifact (v8+, which handles `archive: false` uploads).
+# actions/download-artifact v8+ and `skip-decompress: true`: otherwise the macOS .zip
+# gets unzipped on download, even though it was uploaded with `archive: false`.
 #
 # The builds are unsigned (no Apple or Windows signing certificate): macOS asks for
 # Privacy & Security → Open Anyway on first launch, Windows SmartScreen for "Run anyway".
