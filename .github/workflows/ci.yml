@@ -12,11 +12,6 @@ on:
     branches:
       - development
       - main
-  # Test builds of mac-build before its PR exists. Remove this once the PR is open,
-  # or every push runs CI twice (once per event).
-  push:
-    branches:
-      - mac-build
 
 permissions:
   contents: read
