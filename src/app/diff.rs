@@ -128,15 +128,15 @@ fn diff_body(diff: &Diff) -> Element<'_, Message> {
             .map(|(index, line)| diff_line_view(line, width, index == 0));
 
         scrollable(column(lines).padding(Padding::ZERO.bottom(8.0)))
-        .id(DIFF_SCROLLABLE)
-        .direction(Direction::Both {
-            vertical: theme::thin_scrollbar(),
-            horizontal: theme::thin_scrollbar(),
-        })
-        .style(theme::scrollbar)
-        .width(Fill)
-        .height(Fill)
-        .into()
+            .id(DIFF_SCROLLABLE)
+            .direction(Direction::Both {
+                vertical: theme::thin_scrollbar(),
+                horizontal: theme::thin_scrollbar(),
+            })
+            .style(theme::scrollbar)
+            .width(Fill)
+            .height(Fill)
+            .into()
     })
     .into()
 }
@@ -197,9 +197,7 @@ fn diff_line_view(line: &DiffLine, width: f32, first: bool) -> Element<'_, Messa
         container(row![
             number(old, OLD_NUMBER_PADDING),
             number(new, NEW_NUMBER_PADDING),
-            mono(sign)
-                .color(sign_color)
-                .width(layouts::DIFF_SIGN_WIDTH),
+            mono(sign).color(sign_color).width(layouts::DIFF_SIGN_WIDTH),
         ])
         .style(move |_| container::background(gutter_bg)),
         mono(display_text(line.text())),

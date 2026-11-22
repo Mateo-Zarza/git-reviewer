@@ -129,7 +129,7 @@ impl Worktree {
     /// Only the listed paths are touched, never "everything": a file that appeared after
     /// the user confirmed isn't part of what they agreed to lose.
     pub fn discard(&self, files: &[(String, bool)]) -> Result<(), GitError> {
-        let (untracked, tracked): (Vec<&(String, bool)>, Vec<&(String, bool)>) =
+        let (untracked, tracked): (Vec<_>, Vec<_>) =
             files.iter().partition(|(_, untracked)| *untracked);
 
         // In batches, to stay well under the OS's command-line length limit.
@@ -219,7 +219,7 @@ impl Worktree {
     fn parse_counts(output: &str) -> Option<(usize, usize)> {
         let parts: Vec<&str> = output.split_whitespace().collect();
 
-        let ahead = parts.get(0)?.parse::<usize>().ok()?;
+        let ahead = parts.first()?.parse::<usize>().ok()?;
         let behind = parts.get(1)?.parse::<usize>().ok()?;
         Some((ahead, behind))
     }

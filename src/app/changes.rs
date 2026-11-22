@@ -5,8 +5,7 @@ use iced::widget::scrollable::Direction;
 use iced::widget::text::Wrapping;
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    Button, Row, button, column, container, hover, row, rule, scrollable, space, text,
-    text_editor,
+    Button, Row, button, column, container, hover, row, rule, scrollable, space, text, text_editor,
 };
 use iced::{
     Alignment::Center,
@@ -92,11 +91,8 @@ impl App {
                         .size(text_sizes::LABEL)
                         .color(colors::DANGER)
                 ),
-                None => base_line.map(|line| {
-                    text(line)
-                        .size(text_sizes::LABEL)
-                        .color(colors::TEXT_DIM)
-                }),
+                None => base_line
+                    .map(|line| { text(line).size(text_sizes::LABEL).color(colors::TEXT_DIM) }),
             },
         ]
         .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
@@ -219,8 +215,11 @@ impl App {
             }
 
             let open = self.is_open(&section);
-            let mut group =
-                column![section_header(format!("{title} · {}", files.len()), section, open)];
+            let mut group = column![section_header(
+                format!("{title} · {}", files.len()),
+                section,
+                open
+            )];
             if open {
                 let rows = files
                     .into_iter()
@@ -259,7 +258,9 @@ impl App {
         let is_selected = self
             .selected_file
             .as_ref()
-            .is_some_and(|(path, selected_source)| *path == file.path && *selected_source == source);
+            .is_some_and(|(path, selected_source)| {
+                *path == file.path && *selected_source == source
+            });
         // VS Code's order: discard first, then stage; a staged file can only be unstaged.
         let actions = if staged {
             row![icon_button(
@@ -273,7 +274,11 @@ impl App {
                 untracked: kind == ChangeKind::Untracked,
             };
             row![
-                icon_button(icons::DISCARD, Message::DiscardRequested(discard), is_selected),
+                icon_button(
+                    icons::DISCARD,
+                    Message::DiscardRequested(discard),
+                    is_selected
+                ),
                 icon_button(icons::PLUS, Message::Stage(file.path.clone()), is_selected),
             ]
         };
@@ -389,7 +394,11 @@ fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a
         row![icon_button(icons::MINUS, Message::UnstageAll, false)]
     } else {
         row![
-            icon_button(icons::DISCARD, Message::DiscardRequested(DiscardScope::All), false),
+            icon_button(
+                icons::DISCARD,
+                Message::DiscardRequested(DiscardScope::All),
+                false
+            ),
             icon_button(icons::PLUS, Message::StageAll, false),
         ]
     };

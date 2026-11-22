@@ -29,7 +29,10 @@ use diff::DIFF_SCROLLABLE;
 #[derive(Debug, Clone)]
 pub enum Message {
     WorktreeSelected(PathBuf),
-    FileSelected { path: String, source: DiffSource },
+    FileSelected {
+        path: String,
+        source: DiffSource,
+    },
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -101,7 +104,10 @@ pub struct RemovalPlan {
 /// Which discard button was clicked.
 #[derive(Debug, Clone)]
 pub enum DiscardScope {
-    File { path: String, untracked: bool },
+    File {
+        path: String,
+        untracked: bool,
+    },
     /// Every unstaged change in the worktree, untracked files included.
     All,
 }
@@ -274,12 +280,12 @@ impl App {
             return;
         };
 
-        let result = repo
-            .remove_worktree(&plan.worktree, force)
-            .and_then(|()| match (plan.removal, &plan.branch) {
+        let result = repo.remove_worktree(&plan.worktree, force).and_then(|()| {
+            match (plan.removal, &plan.branch) {
                 (Removal::Branch, Some(branch)) => repo.delete_branch(branch),
                 _ => Ok(()),
-            });
+            }
+        });
         self.error = result.err().map(AppError::from);
 
         self.workspace = self.scan();
@@ -427,10 +433,7 @@ impl App {
                 self.error = None;
                 if let Ok(workspace) = &self.workspace {
                     let repos = workspace.repos().to_vec();
-                    return Task::perform(
-                        async move { Repo::fetch_all(&repos) },
-                        Message::Fetched,
-                    );
+                    return Task::perform(async move { Repo::fetch_all(&repos) }, Message::Fetched);
                 }
             }
             Message::Fetched(result) => {
@@ -597,10 +600,10 @@ impl App {
                                 .height(Fill)
                                 .center(),
                         )
-                            .on_press(Message::ChooseRoot)
-                            .height(layouts::PRIMARY_BUTTON_HEIGHT)
-                            .padding([0.0, 16.0])
-                            .style(theme::primary_button),
+                        .on_press(Message::ChooseRoot)
+                        .height(layouts::PRIMARY_BUTTON_HEIGHT)
+                        .padding([0.0, 16.0])
+                        .style(theme::primary_button),
                     ]
                     .align_x(Center),
                 )
@@ -632,10 +635,13 @@ impl App {
     fn top_bar(&self) -> Element<'_, Message> {
         let bar_button = |icon_bytes: &'static [u8], label: &'static str, message: Message| {
             button(
-                row![icon(icon_bytes, icon_sizes::BUTTON, colors::TEXT), text(label)]
-                    .spacing(6)
-                    .height(Fill)
-                    .align_y(Center),
+                row![
+                    icon(icon_bytes, icon_sizes::BUTTON, colors::TEXT),
+                    text(label)
+                ]
+                .spacing(6)
+                .height(Fill)
+                .align_y(Center),
             )
             .on_press(message)
             .height(layouts::BUTTON_HEIGHT)
@@ -716,8 +722,7 @@ impl App {
                     // A configured base that doesn't resolve is a typo in the config;
                     // say so instead of quietly dropping the "from base" line.
                     if configured_base.is_some() {
-                        self.base_error =
-                            Some(format!("Base `{base}` from the config not found"));
+                        self.base_error = Some(format!("Base `{base}` from the config not found"));
                     }
                     None
                 }
@@ -771,7 +776,7 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            self.diff = Some(selected.diff(&file, *source));
+            self.diff = Some(selected.diff(file, *source));
         }
     }
 

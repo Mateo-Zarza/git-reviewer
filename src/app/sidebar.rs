@@ -67,7 +67,9 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element
         .spacing(6)
         .align_y(Center),
     )
-    .on_press(Message::ToggleSection(Section::Repo(repo.name().to_string())))
+    .on_press(Message::ToggleSection(Section::Repo(
+        repo.name().to_string(),
+    )))
     .width(Fill)
     .padding([2.0, 8.0])
     .style(theme::list_row(false));
@@ -130,9 +132,7 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
     button(
         row![
             icon(icons::GIT_BRANCH, icon_sizes::ROW, colors::TEXT_MUTED),
-            ellipsized_text(label)
-                .wrapping(Wrapping::None)
-                .width(Fill),
+            ellipsized_text(label).wrapping(Wrapping::None).width(Fill),
         ]
         .extend(badges)
         .spacing(layouts::GAP)

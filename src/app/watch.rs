@@ -59,6 +59,9 @@ pub(super) fn subscription(paths: Vec<PathBuf>) -> Subscription<Message> {
 
 // `use<>`: the stream must not borrow `paths` (iced needs a `fn(&D) -> S` with one `S`),
 // so it clones what it needs up front.
+// `&Vec`, not the `&[PathBuf]` clippy suggests: `run_with` takes a `fn(&D)` pointer with
+// `D = Vec<PathBuf>`, and a function taking a slice isn't that type.
+#[allow(clippy::ptr_arg)]
 fn watch(paths: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
     let paths = paths.clone();
 
@@ -138,7 +141,11 @@ fn is_relevant(path: &Path) -> bool {
     let is_noise_file = path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| IGNORED_FILE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)));
+        .is_some_and(|name| {
+            IGNORED_FILE_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        });
     if is_noise_file {
         return false;
     }
@@ -177,7 +184,9 @@ mod tests {
     #[test]
     fn test_build_output_is_ignored() {
         assert!(!is_relevant(Path::new("/repo/target/debug/app.exe")));
-        assert!(!is_relevant(Path::new("/repo/web/node_modules/react/index.js")));
+        assert!(!is_relevant(Path::new(
+            "/repo/web/node_modules/react/index.js"
+        )));
         assert!(!is_relevant(Path::new("/repo/web/dist/bundle.js")));
     }
 
