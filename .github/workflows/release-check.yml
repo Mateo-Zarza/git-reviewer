@@ -1,6 +1,7 @@
 # Extra checks for pull requests into main, each of which is a release:
 #   source-branch: the PR comes from this repo's development branch, nothing else
-#                  (not a feature branch, not a fork);
+#                  (not a feature branch, not a fork), and was opened by the repo's
+#                  owner: releases are his call;
 #   version-bump:  Cargo.toml's version is higher than main's and has no tag yet, so
 #                  the release gets a new tag. (Cargo.lock having the same version
 #                  is checked by every `--locked` build in ci.yml.)
@@ -27,12 +28,18 @@ jobs:
       - env:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_REF" != "development" ]; then
             echo "::error::Releases into main come only from $GITHUB_REPOSITORY's development branch, not $HEAD_REPO:$HEAD_REF."
             exit 1
           fi
-          echo "Source is $HEAD_REPO:$HEAD_REF."
+          # GITHUB_REPOSITORY_OWNER is set by GitHub on every run.
+          if [ "$AUTHOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::Only $GITHUB_REPOSITORY_OWNER opens release PRs into main; this one is by $AUTHOR."
+            exit 1
+          fi
+          echo "Source is $HEAD_REPO:$HEAD_REF, opened by $AUTHOR."
 
   version-bump:
     name: version-bump
