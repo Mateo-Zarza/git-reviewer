@@ -74,8 +74,7 @@ impl Repo {
 
             handles
                 .into_iter()
-                .map(|handle| handle.join().expect("fetch thread panicked"))
-                .collect()
+                .try_for_each(|handle| handle.join().expect("fetch thread panicked"))
         })
     }
 

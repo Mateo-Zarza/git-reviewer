@@ -776,7 +776,7 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            self.diff = Some(selected.diff(&file, *source));
+            self.diff = Some(selected.diff(file, *source));
         }
     }
 

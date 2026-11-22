@@ -59,6 +59,9 @@ pub(super) fn subscription(paths: Vec<PathBuf>) -> Subscription<Message> {
 
 // `use<>`: the stream must not borrow `paths` (iced needs a `fn(&D) -> S` with one `S`),
 // so it clones what it needs up front.
+// `&Vec`, not the `&[PathBuf]` clippy suggests: `run_with` takes a `fn(&D)` pointer with
+// `D = Vec<PathBuf>`, and a function taking a slice isn't that type.
+#[allow(clippy::ptr_arg)]
 fn watch(paths: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
     let paths = paths.clone();
 
