@@ -24,7 +24,7 @@ impl ChangeKind {
         }
     }
 
-    pub fn to_code(&self) -> char {
+    pub fn to_code(self) -> char {
         match self {
             ChangeKind::Added => 'A',
             ChangeKind::Renamed => 'R',

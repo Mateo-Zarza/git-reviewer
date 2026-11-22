@@ -1,0 +1,90 @@
+# Extra checks for pull requests into main, each of which is a release:
+#   source-branch: the PR comes from this repo's development branch, nothing else
+#                  (not a feature branch, not a fork), and was opened by the repo's
+#                  owner: releases are his call;
+#   version-bump:  Cargo.toml's version is higher than main's and has no tag yet, so
+#                  the release gets a new tag. (Cargo.lock having the same version
+#                  is checked by every `--locked` build in ci.yml.)
+# The rest (build, tests, lints) comes from ci.yml.
+
+name: Release check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    name: source-branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Through env, never `${{ }}` inside the script: a branch name is chosen by
+      # whoever opens the PR and could otherwise inject shell code.
+      - env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_REF" != "development" ]; then
+            echo "::error::Releases into main come only from $GITHUB_REPOSITORY's development branch, not $HEAD_REPO:$HEAD_REF."
+            exit 1
+          fi
+          # GITHUB_REPOSITORY_OWNER is set by GitHub on every run.
+          if [ "$AUTHOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::Only $GITHUB_REPOSITORY_OWNER opens release PRs into main; this one is by $AUTHOR."
+            exit 1
+          fi
+          echo "Source is $HEAD_REPO:$HEAD_REF, opened by $AUTHOR."
+
+  version-bump:
+    name: version-bump
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-tags: true
+          path: pr
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: main
+      - name: Compare versions
+        run: |
+          version() {
+            cargo metadata --no-deps --format-version 1 --manifest-path "$1/Cargo.toml" \
+              | jq -r '.packages[0].version'
+          }
+          new=$(version pr)
+          old=$(version main)
+
+          # Plain MAJOR.MINOR.PATCH only: `sort -V` below doesn't order pre-release
+          # suffixes (1.0.0-rc.1) the way semver does.
+          for v in "$new" "$old"; do
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Version '$v' isn't plain MAJOR.MINOR.PATCH."
+              exit 1
+            fi
+          done
+
+          highest=$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n 1)
+          if [ "$new" = "$old" ] || [ "$highest" != "$new" ]; then
+            echo "::error file=Cargo.toml::Bump the version in Cargo.toml (and Cargo.lock): it's $new, main has $old."
+            exit 1
+          fi
+          # Higher than main's isn't enough if that version was released before (e.g.
+          # main was reverted): release.yml would then fail after the merge.
+          if git -C pr rev-parse --quiet --verify "refs/tags/v$new" >/dev/null; then
+            echo "::error file=Cargo.toml::Tag v$new already exists. Pick a version that hasn't been released."
+            exit 1
+          fi
+          echo "Version $old -> $new."

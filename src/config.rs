@@ -50,7 +50,9 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NoConfigDir => write!(f, "no config folder found on this system"),
             ConfigError::Io(path, err) => write!(f, "{}: {err}", path.display()),
-            ConfigError::Parse(path, err) => write!(f, "{} is not valid TOML: {err}", path.display()),
+            ConfigError::Parse(path, err) => {
+                write!(f, "{} is not valid TOML: {err}", path.display())
+            }
             ConfigError::Serialize(err) => write!(f, "could not write the config: {err}"),
         }
     }

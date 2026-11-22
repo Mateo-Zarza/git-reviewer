@@ -1,3 +1,7 @@
+// Release builds on Windows are GUI apps: without this, Windows opens a console window
+// next to the app. Debug builds (`cargo run`) keep theirs, for `eprintln!` and panics.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use iced::Settings;
 
 use crate::{app::App, theme::text_sizes};
