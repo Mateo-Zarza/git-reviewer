@@ -77,8 +77,12 @@ fn icon_for_name(name: &str) -> Option<&'static [u8]> {
         "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "bun.lockb" | "bun.lock" => LOCK,
         ".npmrc" | ".nvmrc" => NPM,
         ".gitignore" | ".gitattributes" | ".gitmodules" | ".gitkeep" => GIT,
-        "dockerfile" | ".dockerignore" | "docker-compose.yml" | "docker-compose.yaml"
-        | "compose.yml" | "compose.yaml" => DOCKER,
+        "dockerfile"
+        | ".dockerignore"
+        | "docker-compose.yml"
+        | "docker-compose.yaml"
+        | "compose.yml"
+        | "compose.yaml" => DOCKER,
         ".env" => ENV,
         _ if name.starts_with(".env.") => ENV,
         _ if name.starts_with(".prettierrc") || name.starts_with("prettier.config.") => PRETTIER,

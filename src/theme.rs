@@ -414,12 +414,18 @@ pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style
             is_horizontal_scrollbar_hovered,
             is_vertical_scrollbar_hovered,
             ..
-        } => (is_horizontal_scrollbar_hovered, is_vertical_scrollbar_hovered),
+        } => (
+            is_horizontal_scrollbar_hovered,
+            is_vertical_scrollbar_hovered,
+        ),
         scrollable::Status::Dragged {
             is_horizontal_scrollbar_dragged,
             is_vertical_scrollbar_dragged,
             ..
-        } => (is_horizontal_scrollbar_dragged, is_vertical_scrollbar_dragged),
+        } => (
+            is_horizontal_scrollbar_dragged,
+            is_vertical_scrollbar_dragged,
+        ),
     };
 
     scrollable::Style {

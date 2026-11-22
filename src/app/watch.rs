@@ -138,7 +138,11 @@ fn is_relevant(path: &Path) -> bool {
     let is_noise_file = path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| IGNORED_FILE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)));
+        .is_some_and(|name| {
+            IGNORED_FILE_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        });
     if is_noise_file {
         return false;
     }
@@ -177,7 +181,9 @@ mod tests {
     #[test]
     fn test_build_output_is_ignored() {
         assert!(!is_relevant(Path::new("/repo/target/debug/app.exe")));
-        assert!(!is_relevant(Path::new("/repo/web/node_modules/react/index.js")));
+        assert!(!is_relevant(Path::new(
+            "/repo/web/node_modules/react/index.js"
+        )));
         assert!(!is_relevant(Path::new("/repo/web/dist/bundle.js")));
     }
 

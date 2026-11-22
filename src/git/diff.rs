@@ -173,7 +173,10 @@ index 7ae3a89..2b51d74 100644
             ]
         );
         assert_eq!(diff.counts(), (1, 1));
-        assert_eq!(diff.lines[2].text(), "            Ok(workspace) => column![");
+        assert_eq!(
+            diff.lines[2].text(),
+            "            Ok(workspace) => column!["
+        );
     }
 
     #[test]
