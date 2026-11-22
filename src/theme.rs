@@ -64,7 +64,10 @@ pub mod icon_sizes {
 }
 
 pub mod layouts {
-    use iced::{Padding, Pixels, widget::text::LineHeight};
+    // `Pixels` only appears in the Windows-tuned tag/pill line heights below.
+    #[cfg(target_os = "windows")]
+    use iced::Pixels;
+    use iced::{Padding, widget::text::LineHeight};
 
     // Bars and panels
     pub const TOP_BAR_HEIGHT: f32 = 48.0;

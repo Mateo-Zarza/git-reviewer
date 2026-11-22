@@ -1,0 +1,142 @@
+# Builds the app for Windows (.exe) and macOS on Apple silicon (a zipped .app) and
+# uploads each file as an artifact of the run.
+#
+# Reusable: it only runs when another workflow calls it (`uses:`), so CI (ci.yml) and
+# releases (release.yml) share exactly this build. release.yml collects the files with
+# actions/download-artifact (v8+, which handles `archive: false` uploads).
+#
+# The builds are unsigned (no Apple or Windows signing certificate): macOS asks for
+# Privacy & Security → Open Anyway on first launch, Windows SmartScreen for "Run anyway".
+
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      cache:
+        description: Reuse cached build output. Releases pass false to build from scratch.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One platform failing shouldn't throw away the other's build.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+    env:
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No job here pushes, so the token isn't left in .git/config.
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET" --no-self-update
+          rustup default stable
+
+      - name: Cache Rust build
+        if: inputs.cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      # The version (from Cargo.toml) goes into the file names, so downloads from
+      # different builds don't overwrite each other.
+      - name: Read version
+        run: |
+          # pkgid ends in `#0.1.0` or `#git-reviewer@0.1.0`; keep what's after # or @.
+          id=$(cargo pkgid)
+          echo "VERSION=${id##*[#@]}" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/git-reviewer.exe" "dist/git-reviewer-$VERSION-$PLATFORM.exe"
+
+      # A .app is just a folder: the binary in Contents/MacOS and an Info.plist that
+      # tells macOS what it is. Built by hand so no extra tool is needed.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app="dist/Git Reviewer.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp "target/$TARGET/release/git-reviewer" "$app/Contents/MacOS/git-reviewer"
+
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key>
+              <string>Git Reviewer</string>
+              <key>CFBundleDisplayName</key>
+              <string>Git Reviewer</string>
+              <key>CFBundleIdentifier</key>
+              <string>io.github.towers77.git-reviewer</string>
+              <key>CFBundleExecutable</key>
+              <string>git-reviewer</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$VERSION</string>
+              <key>CFBundleVersion</key>
+              <string>$VERSION</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>11.0</string>
+              <key>LSApplicationCategoryType</key>
+              <string>public.app-category.developer-tools</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$app/Contents/Info.plist"
+
+          # Ad-hoc signature over the whole bundle (no certificate). Without it, the
+          # binary's own linker signature doesn't cover the Info.plist, and macOS
+          # reports the downloaded app as "damaged" instead of offering Open Anyway.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+
+          # ditto keeps the executable bit and the signature; a plain zip of the
+          # artifact upload wouldn't.
+          ditto -c -k --keepParent "$app" "dist/git-reviewer-$VERSION-$PLATFORM.zip"
+          rm -rf "$app"
+
+      - name: Find the file to upload
+        run: |
+          file=$(ls dist/*)
+          echo "FILE=$file" >> "$GITHUB_ENV"
+
+      # `archive: false` uploads the file itself: the download is the .exe or the .zip,
+      # not a zip wrapped around it. The artifact is named after the file.
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ env.FILE }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

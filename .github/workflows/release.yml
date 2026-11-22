@@ -1,0 +1,88 @@
+# Publishes a release whenever main moves, which only happens by merging a
+# development → main PR (release-check.yml made sure it bumped the version):
+#   1. read the version from Cargo.toml and stop if its v<version> tag already exists;
+#   2. build Windows and macOS from scratch (build.yml, no cache);
+#   3. create the tag on the merged commit and a GitHub Release with both files.
+# Nothing commits to main. Only the last job can write to the repo.
+
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# One run per commit, never cancelled. Not one shared group: GitHub keeps only one run
+# waiting per group and cancels the older one, which would silently skip a release.
+# Releases of different commits can run side by side; each has its own version tag.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Read version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-tags: true
+      - id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          tag="v$version"
+          # Fail loudly rather than skip: main moved without a version bump, which
+          # release-check.yml should have stopped.
+          if git rev-parse --quiet --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::Tag $tag already exists. Bump the version in Cargo.toml to release."
+            exit 1
+          fi
+          echo "Releasing $tag."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      cache: false
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: git-reviewer-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the tag and the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mapfile -t files < <(find dist -type f | sort)
+          printf 'Attaching %s\n' "${files[@]}"
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "::error::Expected 2 files (Windows .exe, macOS .zip), found ${#files[@]}."
+            exit 1
+          fi
+          # With a tag that doesn't exist yet, gh creates it at --target: the commit
+          # this run was started for, not whatever main points to by now.
+          gh release create "$TAG" "${files[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes
