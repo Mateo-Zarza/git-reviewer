@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
@@ -12,7 +13,7 @@ use iced::widget::{
 };
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Padding, Pixels, Size,
+    Color, Element, Fill, Padding, Pixels, Size, Task,
     alignment::{Horizontal::Right, Vertical},
 };
 use iced_palace::widget::ellipsized_text;
@@ -20,7 +21,7 @@ use iced_palace::widget::ellipsized_text;
 use super::sticky::sticky;
 use super::{App, Message, empty_state};
 use crate::git::{Diff, DiffLine, DiffSource};
-use crate::highlight::LineColors;
+use crate::highlight::{self, LineColors};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
 
 /// Lets `update` reset the diff's scroll position when another file is opened.
@@ -50,6 +51,12 @@ const CHUNK_LINES: usize = 64;
 /// run of same-kind lines for the whole file: blocks without text, so even thousands
 /// are cheap. Every line is `DIFF_LINE_HEIGHT` tall, so it all lines up.
 pub(super) struct DiffView {
+    /// The file's path and its diff as git gave it, kept to tell whether a reload
+    /// changed anything and to work out the syntax colors.
+    path: String,
+    diff: Arc<Diff>,
+    /// Whether `start_highlighting` has run.
+    highlighting_started: bool,
     added: usize,
     removed: usize,
     chunks: Vec<Chunk>,
@@ -177,11 +184,10 @@ impl Kind {
 }
 
 impl DiffView {
-    /// `colors` has the syntax colors of `diff`'s lines (see `highlight::diff_colors`),
-    /// or is `None` to draw the code in the default text color.
-    pub(super) fn new(diff: &Diff, colors: Option<&[LineColors]>) -> DiffView {
+    /// The diff of the file at `path`, its code in the default text color until
+    /// `start_highlighting`'s colors come in.
+    pub(super) fn new(path: &str, diff: Diff) -> DiffView {
         let (added, removed) = diff.counts();
-        let mut color_chunks = colors.map(|colors| colors.chunks(CHUNK_LINES));
 
         let mut runs: Vec<Run> = Vec::new();
         for kind in diff.lines.iter().map(Kind::of) {
@@ -192,17 +198,60 @@ impl DiffView {
         }
 
         DiffView {
+            path: path.to_string(),
             added,
             removed,
-            chunks: diff
-                .lines
-                .chunks(CHUNK_LINES)
-                .map(|lines| Chunk::new(lines, color_chunks.as_mut().and_then(Iterator::next)))
-                .collect(),
+            chunks: chunks(&diff, None),
             runs,
-            width: content_width(diff),
+            width: content_width(&diff),
+            diff: Arc::new(diff),
+            highlighting_started: false,
         }
     }
+
+    /// Whether this already shows `diff` of the file at `path`. A reload that changed
+    /// nothing (most refreshes) then keeps it, colors and all.
+    pub(super) fn shows(&self, path: &str, diff: &Diff) -> bool {
+        self.path == path && *self.diff == *diff
+    }
+
+    /// The task that works out the code's syntax colors, off the UI thread, since that
+    /// can take a while (about 0.3 s for both sides of a 5000-line file). `None` once
+    /// it's been started. The result comes back as `Message::DiffHighlighted`.
+    pub(super) fn start_highlighting(&mut self) -> Option<Task<Message>> {
+        if self.highlighting_started {
+            return None;
+        }
+        self.highlighting_started = true;
+
+        let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
+        Some(Task::perform(
+            async move {
+                let colors = highlight::diff_colors(&path, &diff);
+                (diff, colors)
+            },
+            |(diff, colors)| Message::DiffHighlighted(diff, colors),
+        ))
+    }
+
+    /// Colors the code with what `start_highlighting` worked out for `diff`, unless
+    /// that's not the diff shown any more (another file was opened, or this one changed,
+    /// while it ran).
+    pub(super) fn set_colors(&mut self, diff: &Arc<Diff>, colors: &[LineColors]) {
+        if Arc::ptr_eq(&self.diff, diff) {
+            self.chunks = chunks(&self.diff, Some(colors));
+        }
+    }
+}
+
+/// `diff`'s lines in `Chunk`s. `colors` has their syntax colors (see
+/// `highlight::diff_colors`), or is `None` to draw the code in the default text color.
+fn chunks(diff: &Diff, colors: Option<&[LineColors]>) -> Vec<Chunk> {
+    let mut color_chunks = colors.map(|colors| colors.chunks(CHUNK_LINES));
+    diff.lines
+        .chunks(CHUNK_LINES)
+        .map(|lines| Chunk::new(lines, color_chunks.as_mut().and_then(Iterator::next)))
+        .collect()
 }
 
 impl App {
@@ -622,7 +671,7 @@ mod tests {
                 },
             ],
         };
-        let view = DiffView::new(&diff, None);
+        let view = DiffView::new("x", diff);
 
         assert_eq!((view.added, view.removed), (1, 2));
         assert_eq!(view.chunks.len(), 1);
@@ -649,7 +698,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let view = DiffView::new(&diff, None);
+        let view = DiffView::new("x", diff);
 
         assert_eq!(view.chunks.len(), 3);
         assert!(view.chunks[1].old_numbers.starts_with("65\n"));
@@ -683,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chunks_get_their_own_lines_colors() {
+    fn test_colors_go_to_their_chunk_and_only_for_the_shown_diff() {
         let red = Color::from_rgb8(255, 0, 0);
         let diff = Diff {
             lines: (1..=CHUNK_LINES + 1)
@@ -696,11 +745,34 @@ mod tests {
         // Only the last line (alone in the second chunk) is colored.
         let mut colors = vec![LineColors::new(); diff.lines.len()];
         colors[CHUNK_LINES] = vec![(0..2, red)];
-        let view = DiffView::new(&diff, Some(&colors));
+        let mut view = DiffView::new("x.rs", diff);
 
+        // Colors worked out for another diff (one shown before) are dropped.
+        view.set_colors(&Arc::new(Diff { lines: Vec::new() }), &colors);
+        assert_eq!(view.chunks[1].code.colors, vec![(0..2, None)]);
+
+        let shown = Arc::clone(&view.diff);
+        view.set_colors(&shown, &colors);
         assert_eq!(view.chunks[0].code.colors.len(), 1);
         assert_eq!(view.chunks[0].code.colors[0].1, None);
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, Some(red))]);
+    }
+
+    #[test]
+    fn test_reloads_are_recognized_and_highlighting_starts_once() {
+        let diff = || Diff {
+            lines: vec![DiffLine::Added {
+                new: 1,
+                text: "fn main() {}".to_string(),
+            }],
+        };
+        let mut view = DiffView::new("main.rs", diff());
+
+        assert!(view.shows("main.rs", &diff()));
+        assert!(!view.shows("lib.rs", &diff()));
+        assert!(!view.shows("main.rs", &Diff { lines: Vec::new() }));
+        assert!(view.start_highlighting().is_some());
+        assert!(view.start_highlighting().is_none());
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::env::args;
 use std::fmt;
 use std::path::{PathBuf, absolute};
+use std::sync::Arc;
 
 use iced::widget::operation;
 use iced::widget::scrollable::{Direction, RelativeOffset};
@@ -26,8 +27,8 @@ use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
-use crate::git::{ChangeKind, DiffSource, GitError, Repo, Status, Workspace, Worktree};
-use crate::highlight;
+use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::highlight::LineColors;
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
@@ -44,6 +45,9 @@ pub enum Message {
     },
     /// The diff was scrolled; how far down it is now, in pixels.
     DiffScrolled(f32),
+    /// The syntax colors of a diff's lines are worked out (see
+    /// `DiffView::start_highlighting`); `None` if it's not a language we highlight.
+    DiffHighlighted(Arc<Diff>, Option<Vec<LineColors>>),
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -368,6 +372,20 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+
+        // Many messages can load a diff (opening a file, staging, a refresh...), so a
+        // new one's highlighting is started here, after any of them.
+        match &mut self.diff {
+            Some(Ok(diff)) => match diff.start_highlighting() {
+                Some(highlighting) => Task::batch([task, highlighting]),
+                None => task,
+            },
+            _ => task,
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WorktreeSelected(path) => {
                 self.selected_worktree_path = Some(path);
@@ -416,6 +434,12 @@ impl App {
                 return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
             Message::DiffScrolled(y) => self.diff_scroll_y = y,
+            Message::DiffHighlighted(diff, Some(colors)) => {
+                if let Some(Ok(view)) = &mut self.diff {
+                    view.set_colors(&diff, &colors);
+                }
+            }
+            Message::DiffHighlighted(_, None) => {} // stays in the default text color
             Message::Stage(path) => {
                 if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
                     self.report(result);
@@ -896,14 +920,18 @@ impl App {
         }
     }
 
+    /// Reads the selected file's diff again. Its colors come later, from `update`.
     fn load_diff(&mut self) {
-        if let (Some(selected), Some((file, source))) =
+        let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
-        {
-            self.diff = Some(selected.diff(file, *source).map(|diff| {
-                let colors = highlight::diff_colors(file, &diff);
-                DiffView::new(&diff, colors.as_deref())
-            }));
+        else {
+            return;
+        };
+
+        match selected.diff(file, *source) {
+            // Nothing changed (most refreshes): keep what's on screen, colors and all.
+            Ok(diff) if matches!(&self.diff, Some(Ok(view)) if view.shows(file, &diff)) => {}
+            result => self.diff = Some(result.map(|diff| DiffView::new(file, diff))),
         }
     }
 
