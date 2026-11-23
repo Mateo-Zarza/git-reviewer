@@ -7,11 +7,7 @@ use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
     Button, Row, button, column, container, hover, row, rule, scrollable, space, text, text_editor,
 };
-use iced::{
-    Alignment::Center,
-    Border, Color, Element, Fill, Padding,
-    alignment::{Horizontal, Vertical::Bottom},
-};
+use iced::{Alignment::Center, Border, Color, Element, Fill, Padding, alignment::Horizontal};
 use iced_palace::widget::ellipsized_text;
 
 use std::f32::consts::TAU;
@@ -67,23 +63,34 @@ impl App {
             .filter(|(base, _)| Some(base.as_str()) != upstream)
             .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"));
 
-        column![
-            row![
-                ellipsized_text(branch)
-                    .size(text_sizes::BRANCH)
-                    .font(fonts::UI_SEMIBOLD)
-                    .wrapping(Wrapping::None),
-                ellipsized_text(repo_name.unwrap_or_default())
-                    .size(text_sizes::BRANCH)
+        // The repo and upstream go on their own line under the branch: side by side, a
+        // long branch took the whole width (a row hands out width left to right) and
+        // squeezed them away. On this line the repo comes first, so a long upstream is
+        // what gets cut. Pushed only when present: a `None` child would still take a gap.
+        let mut repo_line = row![].spacing(layouts::GAP).padding(Padding::ZERO.top(2.0));
+        if let Some(repo_name) = repo_name {
+            repo_line = repo_line.push(
+                ellipsized_text(repo_name)
+                    .size(text_sizes::SMALL)
                     .color(colors::TEXT_MUTED)
                     .wrapping(Wrapping::None),
-                ellipsized_text(upstream.unwrap_or_default())
+            );
+        }
+        if let Some(upstream) = upstream {
+            repo_line = repo_line.push(
+                ellipsized_text(upstream)
                     .size(text_sizes::SMALL)
                     .color(colors::TEXT_DIM)
                     .wrapping(Wrapping::None),
-            ]
-            .spacing(layouts::GAP)
-            .align_y(Bottom),
+            );
+        }
+
+        column![
+            ellipsized_text(branch)
+                .size(text_sizes::BRANCH)
+                .font(fonts::UI_SEMIBOLD)
+                .wrapping(Wrapping::None),
+            repo_line,
             // A broken base from the config takes the base line's place, in red.
             match &self.base_error {
                 Some(problem) => Some(
