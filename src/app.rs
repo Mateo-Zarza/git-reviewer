@@ -75,6 +75,17 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
+    /// A repo's archive button was clicked, with the repo's folder.
+    ArchiveRepo(PathBuf),
+    /// An archived repo's unarchive button was clicked, with the repo's folder.
+    UnarchiveRepo(PathBuf),
+    /// The sidebar's Archived header was clicked: open or close the list.
+    ToggleArchived,
+    /// The cursor entered (`hovered`) or left a repo's header in the sidebar.
+    RepoHovered {
+        repo: PathBuf,
+        hovered: bool,
+    },
     /// The error toast's close button was clicked.
     DismissError,
     /// The mouse went down on a divider between panels.
@@ -179,6 +190,9 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
+    /// button in place of its worktree count.
+    hovered_repo: Option<PathBuf>,
     /// What's remembered between runs in `state.toml`: the panel widths the user dragged
     /// to (what's shown may be narrower: see `PanelWidths::fitted`).
     state: State,
@@ -246,6 +260,7 @@ impl App {
             base_counts: None,
             base_error: None,
             collapsed: HashSet::new(),
+            hovered_repo: None,
             state: State::load(),
             dragging: None,
             window_width: f32::INFINITY,
@@ -579,6 +594,59 @@ impl App {
                     self.collapsed.insert(section);
                 }
             }
+            Message::ArchiveRepo(repo) => {
+                // An archived repo's worktrees aren't listed or refreshed any more, so
+                // its selected worktree would be left on screen going stale.
+                if self
+                    .selected_repo()
+                    .is_some_and(|selected| selected.path() == repo)
+                {
+                    self.selected_worktree_path = None;
+                    // With no selection these run no git: they just clear the changes
+                    // panel and the diff.
+                    self.load_status();
+                    self.retarget_selected_file();
+                }
+                // Moved rather than rescanned: a rescan runs git in every repo, which
+                // held the window up for most of a second.
+                if let Ok(workspace) = &mut self.workspace {
+                    workspace.archive(&repo);
+                }
+                // Its row is gone, so its `on_exit` never comes: without this, the repo
+                // would come back from the Archived list showing its archive button.
+                if self.hovered_repo.as_ref() == Some(&repo) {
+                    self.hovered_repo = None;
+                }
+                self.state.sidebar.archived.insert(repo);
+                self.save_state("the archived repos");
+            }
+            Message::UnarchiveRepo(repo) => {
+                // Only this repo is reopened. The watcher picks its worktrees up, since
+                // the list it's keyed on changes.
+                let result = match &mut self.workspace {
+                    Ok(workspace) => workspace.unarchive(&repo),
+                    Err(_) => Ok(()),
+                };
+                // A repo git can't open stays archived, so the list and the file agree.
+                if result.is_ok() {
+                    self.state.sidebar.archived.remove(&repo);
+                    self.save_state("the archived repos");
+                }
+                self.report(result);
+            }
+            Message::RepoHovered { repo, hovered } => {
+                if hovered {
+                    self.hovered_repo = Some(repo);
+                } else if self.hovered_repo.as_ref() == Some(&repo) {
+                    // Only the row being left: when moving between rows, the next one's
+                    // enter may arrive before this exit.
+                    self.hovered_repo = None;
+                }
+            }
+            Message::ToggleArchived => {
+                self.state.sidebar.archived_open = !self.state.sidebar.archived_open;
+                self.save_state("the Archived list's state");
+            }
             Message::DismissError => self.error = None,
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
@@ -591,11 +659,7 @@ impl App {
             Message::DividerReleased => {
                 self.dragging = None;
                 // Saved once, when the drag ends, rather than on every move.
-                if let Err(err) = self.state.save() {
-                    self.error = Some(AppError::Message(format!(
-                        "Couldn't save the panel widths: {err}"
-                    )));
-                }
+                self.save_state("the panel widths");
             }
             Message::WindowResized(width) => self.window_width = width,
         }
@@ -608,6 +672,14 @@ impl App {
     fn report<T>(&mut self, result: Result<T, GitError>) {
         if let Err(err) = result {
             self.error = Some(err.into());
+        }
+    }
+
+    /// Writes `state.toml`. A failure is shown in the toast, naming `what` wasn't saved;
+    /// the change still applies until the app closes.
+    fn save_state(&mut self, what: &str) {
+        if let Err(err) = self.state.save() {
+            self.error = Some(AppError::Message(format!("Couldn't save {what}: {err}")));
         }
     }
 

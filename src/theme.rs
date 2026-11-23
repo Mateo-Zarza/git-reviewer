@@ -59,6 +59,8 @@ pub mod icon_sizes {
     pub const ROW: f32 = 15.0;
     /// The repo header's chevron.
     pub const CHEVRON: f32 = 14.0;
+    /// The sidebar's archive/unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
+    pub const SIDEBAR_BUTTON: f32 = 14.0;
 }
 
 pub mod layouts {
@@ -84,6 +86,9 @@ pub mod layouts {
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;
     pub const ICON_BUTTON: f32 = 24.0;
+    /// The sidebar's archive/unarchive buttons: smaller, like VS Code's tree-row actions,
+    /// so they fit the repo rows without making them taller.
+    pub const SIDEBAR_ICON_BUTTON: f32 = 20.0;
     /// File rows and section headers in the changes list.
     pub const LIST_ROW_HEIGHT: f32 = 32.0;
     /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
@@ -114,6 +119,9 @@ pub mod layouts {
     pub const GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 10.0;
     pub const REPO_GAP: f32 = 14.0;
+    /// The sidebar's Archived list scrolls past this height (about six rows), so an
+    /// open list never takes over the repos above it.
+    pub const ARCHIVED_LIST_MAX_HEIGHT: f32 = 180.0;
 
     // Sidebar tags ("main", "gone"): the label's line box and the padding around it,
     // chosen so the lowercase letters sit centered between the borders. Segoe UI's line
@@ -214,6 +222,8 @@ pub mod icons {
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
     pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
     pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
+    pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
+    pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
     pub fn chevron<'a>(open: bool) -> Svg<'a> {

@@ -7,8 +7,8 @@ use crate::git::{GitError, Repo, Worktree};
 
 pub struct Workspace {
     repos: Vec<Repo>,
-    /// Repos set aside by the user: their worktrees are listed but carry no status, and
-    /// the `find_*` lookups never return them.
+    /// Repos set aside by the user: their worktrees are listed but their statuses aren't
+    /// loaded or kept up to date, and the `find_*` lookups never return them.
     archived: Vec<Repo>,
 }
 
@@ -73,6 +73,27 @@ impl Workspace {
         })
     }
 
+    /// Moves a repo to the archived list, without any git call: no rescan, so archiving
+    /// is instant. Its worktrees' statuses stay as they were; nothing reads them.
+    pub fn archive(&mut self, path: &Path) {
+        if let Some(index) = self.repos.iter().position(|repo| repo.path() == path) {
+            let repo = self.repos.remove(index);
+            insert_by_name(&mut self.archived, repo);
+        }
+    }
+
+    /// Moves an archived repo back, reopened so its worktree list and statuses are
+    /// current: nothing kept them up to date while it was archived. On error it stays
+    /// archived.
+    pub fn unarchive(&mut self, path: &Path) -> Result<(), GitError> {
+        if let Some(index) = self.archived.iter().position(|repo| repo.path() == path) {
+            let repo = Repo::open(path)?;
+            self.archived.remove(index);
+            insert_by_name(&mut self.repos, repo);
+        }
+        Ok(())
+    }
+
     /// The repos in use, which everything else (watching, fetching, selecting) works on.
     pub fn repos(&self) -> &[Repo] {
         &self.repos
@@ -81,4 +102,10 @@ impl Workspace {
     pub fn archived(&self) -> &[Repo] {
         &self.archived
     }
+}
+
+/// Inserts `repo` where it keeps `list` sorted by name, as `scan` leaves it.
+fn insert_by_name(list: &mut Vec<Repo>, repo: Repo) {
+    let index = list.partition_point(|other| other.name() < repo.name());
+    list.insert(index, repo);
 }
