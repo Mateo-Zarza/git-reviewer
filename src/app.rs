@@ -15,11 +15,12 @@ use std::fmt;
 use std::path::{PathBuf, absolute};
 
 use iced::widget::operation;
-use iced::widget::scrollable::RelativeOffset;
+use iced::widget::scrollable::{Direction, RelativeOffset};
 use iced::widget::{
-    Container, button, column, container, row, rule, space, stack, text, text_editor,
+    Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
+    text_editor,
 };
-use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task, window};
+use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::Instant;
 
@@ -71,6 +72,8 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
+    /// The error toast's close button was clicked.
+    DismissError,
     /// The mouse went down on a divider between panels.
     DividerGrabbed(Divider),
     /// The cursor's x while a divider is dragged.
@@ -160,6 +163,8 @@ pub struct App {
     /// so whatever the user put in it isn't destroyed.
     config_is_writable: bool,
     diff: Option<Result<Diff, GitError>>,
+    /// How wide `diff`'s rows are drawn (see `diff::content_width`), worked out when it loads.
+    diff_width: f32,
     error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
@@ -230,6 +235,7 @@ impl App {
             config,
             config_is_writable,
             diff: None,
+            diff_width: 0.0,
             error,
             commit_message: text_editor::Content::new(),
             base_counts: None,
@@ -310,7 +316,7 @@ impl App {
                 _ => Ok(()),
             }
         });
-        self.error = result.err().map(AppError::from);
+        self.report(result);
 
         self.workspace = self.scan();
         // If the selected worktree was the one removed, there's nothing left to show.
@@ -326,7 +332,6 @@ impl App {
     /// it's keyed on changes.
     fn set_root(&mut self, root: PathBuf) {
         self.root = Some(root.clone());
-        self.error = None;
         if self.config_is_writable {
             self.config.root = Some(root);
             if let Err(err) = self.config.save() {
@@ -404,32 +409,32 @@ impl App {
                 return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
             Message::Stage(path) => {
-                if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.stage(&path).err().map(AppError::from);
+                if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
+                    self.report(result);
                 }
 
                 self.load_status();
                 self.retarget_selected_file();
             }
             Message::Unstage(path) => {
-                if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.unstage(&path).err().map(AppError::from);
+                if let Some(result) = self.selected_worktree().map(|w| w.unstage(&path)) {
+                    self.report(result);
                 }
 
                 self.load_status();
                 self.retarget_selected_file();
             }
             Message::StageAll => {
-                if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.stage_all().err().map(AppError::from);
+                if let Some(result) = self.selected_worktree().map(Worktree::stage_all) {
+                    self.report(result);
                 }
 
                 self.load_status();
                 self.retarget_selected_file();
             }
             Message::UnstageAll => {
-                if let Some(worktree) = self.selected_worktree() {
-                    self.error = worktree.unstage_all().err().map(AppError::from);
+                if let Some(result) = self.selected_worktree().map(Worktree::unstage_all) {
+                    self.report(result);
                 }
 
                 self.load_status();
@@ -441,29 +446,21 @@ impl App {
             Message::Commit => {
                 if let Some(worktree) = self.selected_worktree() {
                     match worktree.commit(&self.commit_message.text()) {
-                        Ok(_) => {
-                            self.commit_message = text_editor::Content::new();
-                            self.error = None;
-                        }
-                        Err(err) => {
-                            self.error = Some(err.into());
-                        }
+                        Ok(_) => self.commit_message = text_editor::Content::new(),
+                        Err(err) => self.error = Some(err.into()),
                     }
                     self.load_status();
                     self.retarget_selected_file();
                 }
             }
             Message::FetchAll => {
-                self.error = None;
                 if let Ok(workspace) = &self.workspace {
                     let repos = workspace.repos().to_vec();
                     return Task::perform(async move { Repo::fetch_all(&repos) }, Message::Fetched);
                 }
             }
             Message::Fetched(result) => {
-                if let Err(err) = result {
-                    self.error = Some(err.into());
-                }
+                self.report(result);
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
                 // everything rather than just the selected status.
                 self.workspace = self.scan();
@@ -472,7 +469,6 @@ impl App {
             // One push/pull at a time: the button is disabled while one runs, and these
             // guards also cover a message that was already queued.
             Message::Sync if self.remote_op.is_none() => {
-                self.error = None;
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Sync, Instant::now()));
                     return Task::perform(async move { worktree.sync() }, Message::Synced);
@@ -480,12 +476,11 @@ impl App {
             }
             Message::Synced(result) => {
                 self.remote_op = None;
-                self.error = result.err().map(AppError::from);
+                self.report(result);
                 self.load_status();
                 self.load_diff();
             }
             Message::Publish if self.remote_op.is_none() => {
-                self.error = None;
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Publish, Instant::now()));
                     return Task::perform(async move { worktree.publish() }, Message::Published);
@@ -493,7 +488,7 @@ impl App {
             }
             Message::Published(result) => {
                 self.remote_op = None;
-                self.error = result.err().map(AppError::from);
+                self.report(result);
                 self.load_status();
                 self.load_diff();
             }
@@ -527,8 +522,8 @@ impl App {
                     Ok(workspace) if confirmed => workspace.find_worktree(&plan.worktree),
                     _ => None,
                 };
-                if let Some(worktree) = worktree {
-                    self.error = worktree.discard(&plan.files).err().map(AppError::from);
+                if let Some(result) = worktree.map(|w| w.discard(&plan.files)) {
+                    self.report(result);
                     self.load_status();
                     self.retarget_selected_file();
                 }
@@ -574,6 +569,7 @@ impl App {
                     self.collapsed.insert(section);
                 }
             }
+            Message::DismissError => self.error = None,
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
             }
@@ -594,6 +590,15 @@ impl App {
             Message::WindowResized(width) => self.window_width = width,
         }
         Task::none()
+    }
+
+    /// Shows a failed action's error in the toast. Success leaves the toast alone: like
+    /// VS Code's error notifications, it stays until it's closed or a newer error
+    /// replaces it, so it can't vanish before it's read.
+    fn report<T>(&mut self, result: Result<T, GitError>) {
+        if let Err(err) = result {
+            self.error = Some(err.into());
+        }
     }
 
     /// Watches every worktree's folder so the app refreshes itself after edits or
@@ -684,18 +689,70 @@ impl App {
             }
         };
 
-        // Always a stack, so starting a drag only adds a layer on top: swapping in a
-        // different root widget would rebuild everything under it and lose scroll
-        // positions.
-        let mut screen = stack![column![
+        let window = column![
             self.top_bar(),
             rule::horizontal(1).style(theme::divider),
             body
-        ]];
-        if self.dragging.is_some() {
-            screen = screen.push(panels::drag_overlay());
+        ];
+
+        // The toast floats over the window as a second layer, and while a divider is
+        // dragged its overlay goes on top of everything. The window stays the first
+        // layer either way, so its widgets keep their state (scroll offsets, the commit
+        // box's cursor) when a toast or a drag comes or goes.
+        let mut layers = stack![window].width(Fill).height(Fill);
+        if let Some(toast) = self.error_toast() {
+            layers = layers.push(toast);
         }
-        screen.into()
+        if self.dragging.is_some() {
+            layers = layers.push(panels::drag_overlay());
+        }
+        layers.into()
+    }
+
+    /// The latest error, on a card in the bottom-right corner like VS Code's
+    /// notifications. It stays until its × is clicked or a newer error replaces it (see
+    /// `report`). A long message, like a hook's output, scrolls inside the card.
+    fn error_toast(&self) -> Option<Element<'_, Message>> {
+        let error = self.error.as_ref()?;
+
+        let message = scrollable(
+            container(text(error.to_string()).size(text_sizes::SMALL).width(Fill))
+                // Room for the scrollbar, which is drawn over the content.
+                .padding(Padding::ZERO.right(10.0)),
+        )
+        .direction(Direction::Vertical(theme::thin_scrollbar()))
+        .style(theme::scrollbar)
+        .width(Fill);
+
+        let card = container(
+            row![
+                // 2px down: centers the icon on the message's first line.
+                container(icon(
+                    icons::CIRCLE_ALERT,
+                    icon_sizes::BUTTON,
+                    colors::DANGER
+                ))
+                .padding(Padding::ZERO.top(2.0)),
+                message,
+                changes::icon_button(icons::X, Message::DismissError, false),
+            ]
+            .spacing(layouts::GAP),
+        )
+        .padding([10.0, 12.0])
+        .width(layouts::TOAST_WIDTH)
+        .max_height(layouts::TOAST_MAX_HEIGHT)
+        .style(theme::toast);
+
+        // `opaque`: in a stack, the mouse passes through to the layer below wherever the
+        // top layer has nothing interactive, so clicks on the message's text would land
+        // on whatever row is under the card. Outside the card they still do, on purpose.
+        Some(
+            container(opaque(card))
+                .align_right(Fill)
+                .align_bottom(Fill)
+                .padding(layouts::PANEL_PADDING_X)
+                .into(),
+        )
     }
 
     fn top_bar(&self) -> Element<'_, Message> {
@@ -736,13 +793,6 @@ impl App {
                 .on_press(Message::ChooseRoot)
                 .padding([4.0, 8.0])
                 .style(theme::list_row(false)),
-                text(
-                    self.error
-                        .as_ref()
-                        .map(|e| e.to_string())
-                        .unwrap_or_default()
-                )
-                .color(colors::DANGER),
                 space().width(Fill),
                 bar_button(icons::DOWNLOAD, "Fetch all", Message::FetchAll),
                 bar_button(icons::ROTATE_CW, "Refresh", Message::Refresh),
@@ -842,7 +892,9 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            self.diff = Some(selected.diff(file, *source));
+            let diff = selected.diff(file, *source);
+            self.diff_width = diff.as_ref().map_or(0.0, diff::content_width);
+            self.diff = Some(diff);
         }
     }
 
@@ -904,7 +956,7 @@ fn discard_question(plan: &DiscardPlan) -> String {
     }
 }
 
-/// What the top bar's error slot (and the empty window, when there's no workspace) shows.
+/// What the error toast (and the empty window, when there's no workspace) shows.
 #[derive(Debug, Clone)]
 pub enum AppError {
     /// A failed git command, shown with git's own message.
