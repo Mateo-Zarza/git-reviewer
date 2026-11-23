@@ -99,10 +99,18 @@ impl Worktree {
         Ok(Status::parse(&output))
     }
 
+    /// The file's diff as the whole file with the changes inline. git is asked for so
+    /// much context that one hunk spans the file (a file over a million lines would come
+    /// back as a few hunks, which still parse; only the gaps between them go missing).
     pub fn diff(&self, path: &str, source: DiffSource) -> Result<Diff, GitError> {
+        const WHOLE_FILE: &str = "--unified=1000000";
         Ok(match source {
-            DiffSource::Staged => Diff::parse(&self.git.run(&["diff", "--cached", "--", path])?),
-            DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", "--", path])?),
+            DiffSource::Staged => Diff::parse(
+                &self
+                    .git
+                    .run(&["diff", "--cached", WHOLE_FILE, "--", path])?,
+            ),
+            DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", WHOLE_FILE, "--", path])?),
             DiffSource::Untracked => {
                 Diff::from_new_file(&std::fs::read_to_string(self.path().join(path))?)
             }

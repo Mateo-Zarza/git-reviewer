@@ -7,6 +7,7 @@ mod diff;
 mod file_icon;
 mod panels;
 mod sidebar;
+mod sticky;
 mod watch;
 
 use std::collections::HashSet;
@@ -25,11 +26,11 @@ use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
-use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::git::{ChangeKind, DiffSource, GitError, Repo, Status, Workspace, Worktree};
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
-use diff::DIFF_SCROLLABLE;
+use diff::{DIFF_SCROLLABLE, DiffView};
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 
@@ -40,6 +41,8 @@ pub enum Message {
         path: String,
         source: DiffSource,
     },
+    /// The diff was scrolled; how far down it is now, in pixels.
+    DiffScrolled(f32),
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -162,9 +165,11 @@ pub struct App {
     /// False when the config file exists but couldn't be read: it's then never written,
     /// so whatever the user put in it isn't destroyed.
     config_is_writable: bool,
-    diff: Option<Result<Diff, GitError>>,
-    /// How wide `diff`'s rows are drawn (see `diff::content_width`), worked out when it loads.
-    diff_width: f32,
+    /// The selected file's diff, already laid out for drawing (see `diff::DiffView`).
+    diff: Option<Result<DiffView, GitError>>,
+    /// How far down the diff is scrolled, in pixels: only the lines around it are built
+    /// (see `diff::chunk_layers`).
+    diff_scroll_y: f32,
     error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
@@ -235,7 +240,7 @@ impl App {
             config,
             config_is_writable,
             diff: None,
-            diff_width: 0.0,
+            diff_scroll_y: 0.0,
             error,
             commit_message: text_editor::Content::new(),
             base_counts: None,
@@ -406,8 +411,10 @@ impl App {
                 self.load_diff();
                 // iced keeps a scrollable's offset across content changes, so a newly
                 // opened file would start wherever the previous one was scrolled to.
+                self.diff_scroll_y = 0.0;
                 return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
+            Message::DiffScrolled(y) => self.diff_scroll_y = y,
             Message::Stage(path) => {
                 if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
                     self.report(result);
@@ -892,9 +899,11 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            let diff = selected.diff(file, *source);
-            self.diff_width = diff.as_ref().map_or(0.0, diff::content_width);
-            self.diff = Some(diff);
+            self.diff = Some(
+                selected
+                    .diff(file, *source)
+                    .map(|diff| DiffView::new(&diff)),
+            );
         }
     }
 

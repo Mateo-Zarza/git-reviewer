@@ -1,6 +1,8 @@
+/// One line of a whole-file diff. Each line keeps its number on the side(s) it exists
+/// on, so the old file (context + removed lines, in order) and the new file (context +
+/// added lines) can both be read back out of a `Diff`.
 #[derive(Debug, PartialEq)]
 pub enum DiffLine {
-    Hunk(String), // "@@ -38,7 +38,7 @@ impl App {"
     Context {
         old: usize,
         new: usize,
@@ -17,13 +19,28 @@ pub enum DiffLine {
 }
 
 impl DiffLine {
-    /// The line's content, without the +/-/space prefix (the whole header for hunks).
+    /// The line's content, without the +/-/space prefix.
     pub fn text(&self) -> &str {
         match self {
-            DiffLine::Hunk(text)
-            | DiffLine::Context { text, .. }
+            DiffLine::Context { text, .. }
             | DiffLine::Added { text, .. }
             | DiffLine::Removed { text, .. } => text,
+        }
+    }
+
+    /// The line's number in the old file, if it's in the old file (not an added line).
+    pub fn old_number(&self) -> Option<usize> {
+        match self {
+            DiffLine::Context { old, .. } | DiffLine::Removed { old, .. } => Some(*old),
+            DiffLine::Added { .. } => None,
+        }
+    }
+
+    /// The line's number in the new file, if it's in the new file (not a removed line).
+    pub fn new_number(&self) -> Option<usize> {
+        match self {
+            DiffLine::Context { new, .. } | DiffLine::Added { new, .. } => Some(*new),
+            DiffLine::Removed { .. } => None,
         }
     }
 }
@@ -35,6 +52,8 @@ pub enum DiffSource {
     Untracked,
 }
 
+/// A file's diff as the whole file, changes inline (like VS Code), not hunks: git is
+/// asked for enough context that one hunk covers everything (see `Worktree::diff`).
 #[derive(Debug, PartialEq)]
 pub struct Diff {
     pub lines: Vec<DiffLine>,
@@ -52,7 +71,7 @@ impl Diff {
     }
 
     pub(super) fn from_new_file(content: &str) -> Diff {
-        let mut lines: Vec<DiffLine> = content
+        let lines = content
             .lines()
             .enumerate()
             .map(|(i, line)| DiffLine::Added {
@@ -61,7 +80,6 @@ impl Diff {
             })
             .collect();
 
-        lines.insert(0, DiffLine::Hunk(format!("@@ -0,0 +1,{} @@", lines.len())));
         Diff { lines }
     }
 
@@ -74,12 +92,12 @@ impl Diff {
 
         for line in lines {
             match line.chars().next() {
+                // Not shown: a hunk header only says where its line numbers start.
                 Some('@') => {
                     if let Some((old_start, new_start)) = Diff::parse_hunk_header(line) {
                         old = old_start;
                         new = new_start;
                     }
-                    diff.push(DiffLine::Hunk(line.to_string()))
                 }
                 Some('+') => {
                     diff.push(DiffLine::Added {
@@ -156,7 +174,6 @@ index 7ae3a89..2b51d74 100644
         assert_eq!(
             diff.lines,
             vec![
-                DiffLine::Hunk("@@ -38,7 +38,7 @@ impl App {".to_string()),
                 DiffLine::Context {
                     old: 38,
                     new: 38,
@@ -174,8 +191,38 @@ index 7ae3a89..2b51d74 100644
         );
         assert_eq!(diff.counts(), (1, 1));
         assert_eq!(
-            diff.lines[2].text(),
+            diff.lines[1].text(),
             "            Ok(workspace) => column!["
+        );
+    }
+
+    #[test]
+    fn test_parse_skips_no_newline_marker() {
+        let output = "@@ -1,2 +1,2 @@
+ kept
+-old end
+\\ No newline at end of file
++new end
+\\ No newline at end of file
+";
+        let diff = Diff::parse(output);
+        assert_eq!(
+            diff.lines,
+            vec![
+                DiffLine::Context {
+                    old: 1,
+                    new: 1,
+                    text: "kept".to_string()
+                },
+                DiffLine::Removed {
+                    old: 2,
+                    text: "old end".to_string()
+                },
+                DiffLine::Added {
+                    new: 2,
+                    text: "new end".to_string()
+                },
+            ]
         );
     }
 
@@ -205,7 +252,6 @@ index 7ae3a89..2b51d74 100644
         assert_eq!(
             diff.lines,
             vec![
-                DiffLine::Hunk("@@ -0,0 +1,3 @@".to_string()),
                 DiffLine::Added {
                     new: 1,
                     text: "Line 1".to_string()
