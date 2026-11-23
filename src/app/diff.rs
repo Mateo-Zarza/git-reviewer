@@ -16,6 +16,7 @@ use iced::{
 };
 use iced_palace::widget::ellipsized_text;
 
+use super::sticky::sticky;
 use super::{App, Message, empty_state};
 use crate::git::{Diff, DiffLine, DiffSource};
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
@@ -36,16 +37,20 @@ const CODE_PADDING_RIGHT: f32 = 24.0;
 /// The selected file's diff, laid out the way `diff_body` draws it. `load_diff` builds
 /// it once per diff, so `view`, which runs after every message, does no per-line work.
 ///
-/// Each column (old numbers, new numbers, code) is a single text with one line per diff
-/// line, not a row of widgets per line: a whole file would be tens of thousands of
-/// widgets, rebuilt after every message, and iced has no virtual list. Every line is
+/// Each column (old numbers, new numbers, signs, code) is a single text with one line
+/// per diff line, not a row of widgets per line: a whole file would be tens of thousands
+/// of widgets, rebuilt after every message, and iced has no virtual list. Every line is
 /// `DIFF_LINE_HEIGHT` tall, so the columns line up, and the tints behind them are one
-/// block per run of same-kind lines.
+/// block per run of same-kind lines (blocks without text, so even thousands are cheap).
 pub(super) struct DiffView {
     added: usize,
     removed: usize,
     old_numbers: String,
     new_numbers: String,
+    /// The sign column is two texts drawn over each other, since a text has one color:
+    /// green `+` on added lines and red `−` on removed ones, each blank elsewhere.
+    plus_signs: String,
+    minus_signs: String,
     code: String,
     runs: Vec<Run>,
     /// How wide the rows must be to fit the longest line, gutter and padding included.
@@ -56,8 +61,6 @@ pub(super) struct DiffView {
 struct Run {
     kind: Kind,
     lines: usize,
-    /// The run's +/− signs, one line each (empty for unchanged lines).
-    signs: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -91,20 +94,8 @@ impl DiffView {
         for kind in diff.lines.iter().map(Kind::of) {
             match runs.last_mut() {
                 Some(run) if run.kind == kind => run.lines += 1,
-                _ => runs.push(Run {
-                    kind,
-                    lines: 1,
-                    signs: String::new(),
-                }),
+                _ => runs.push(Run { kind, lines: 1 }),
             }
-        }
-        for run in &mut runs {
-            let sign = match run.kind {
-                Kind::Context => continue,
-                Kind::Added => "+",
-                Kind::Removed => "−",
-            };
-            run.signs = vec![sign; run.lines].join("\n");
         }
 
         DiffView {
@@ -112,6 +103,14 @@ impl DiffView {
             removed,
             old_numbers: column(|line| number(line.old_number())),
             new_numbers: column(|line| number(line.new_number())),
+            plus_signs: column(|line| match line {
+                DiffLine::Added { .. } => "+".to_string(),
+                _ => String::new(),
+            }),
+            minus_signs: column(|line| match line {
+                DiffLine::Removed { .. } => "−".to_string(),
+                _ => String::new(),
+            }),
             code: column(|line| display_text(line.text())),
             runs,
             width: content_width(diff),
@@ -233,7 +232,8 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Elemen
 }
 
 /// The whole file, scrollable both ways: the gutter (line numbers and signs) and the
-/// code, each a few texts over a column of tint blocks (see `DiffView`).
+/// code, each a few texts over a column of tint blocks (see `DiffView`). The gutter
+/// stays at the left edge when scrolled sideways.
 ///
 /// Lines don't wrap, so the code is as wide as its longest line (`DiffView::width`), or
 /// the panel if that's wider, so the tints run edge to edge. (Nothing can just be `Fill`:
@@ -248,6 +248,11 @@ fn diff_body(diff: &DiffView) -> Element<'_, Message> {
             row![
                 line_numbers(&diff.old_numbers, OLD_NUMBER_PADDING),
                 line_numbers(&diff.new_numbers, NEW_NUMBER_PADDING),
+                stack![
+                    mono(diff.plus_signs.as_str()).color(colors::ADDED),
+                    mono(diff.minus_signs.as_str()).color(colors::DELETED),
+                ]
+                .width(layouts::DIFF_SIGN_WIDTH),
             ],
         ];
         let code = stack![
@@ -257,7 +262,11 @@ fn diff_body(diff: &DiffView) -> Element<'_, Message> {
             mono(diff.code.as_str()).width(diff.width - GUTTER_WIDTH),
         ];
 
-        scrollable(row![gutter, code].padding(Padding::ZERO.bottom(8.0)))
+        // The gutter goes over a gap left for it, as a `Sticky` stack layer, so it stays
+        // put when the code is scrolled sideways.
+        let content = stack![row![space().width(GUTTER_WIDTH), code], sticky(gutter)];
+
+        scrollable(container(content).padding(Padding::ZERO.bottom(8.0)))
             .id(DIFF_SCROLLABLE)
             .direction(Direction::Both {
                 vertical: theme::thin_scrollbar(),
@@ -276,17 +285,16 @@ fn lines_height(lines: usize) -> f32 {
     lines as f32 * layouts::DIFF_LINE_HEIGHT
 }
 
-/// One run's stretch of the gutter: its background, with the run's +/− signs in the
-/// sign column at its right edge.
+/// One run's stretch of the gutter background. It's opaque even for unchanged lines,
+/// since the sticky gutter covers code scrolled under it.
 fn gutter_run(run: &Run) -> Element<'_, Message> {
-    let (background, sign_color) = match run.kind {
-        Kind::Context => (colors::BACKGROUND, colors::LINE_NUMBER),
-        Kind::Added => (colors::ADDED_GUTTER, colors::ADDED),
-        Kind::Removed => (colors::REMOVED_GUTTER, colors::DELETED),
+    let background = match run.kind {
+        Kind::Context => colors::BACKGROUND,
+        Kind::Added => colors::ADDED_GUTTER,
+        Kind::Removed => colors::REMOVED_GUTTER,
     };
 
-    container(mono(run.signs.as_str()).color(sign_color))
-        .padding(Padding::ZERO.left(GUTTER_WIDTH - layouts::DIFF_SIGN_WIDTH))
+    container(space())
         .width(GUTTER_WIDTH)
         .height(lines_height(run.lines))
         .style(move |_| container::background(background))
@@ -431,12 +439,10 @@ mod tests {
         assert_eq!(view.old_numbers, "1\n2\n3\n\n4");
         assert_eq!(view.new_numbers, "1\n\n\n2\n3");
         assert_eq!(view.code, "same\nold\nolder\nnew\n");
-        let runs: Vec<_> = view
-            .runs
-            .iter()
-            .map(|run| (run.lines, run.signs.as_str()))
-            .collect();
-        assert_eq!(runs, vec![(1, ""), (2, "−\n−"), (1, "+"), (1, "")]);
+        assert_eq!(view.plus_signs, "\n\n\n+\n");
+        assert_eq!(view.minus_signs, "\n−\n−\n\n");
+        let runs: Vec<_> = view.runs.iter().map(|run| run.lines).collect();
+        assert_eq!(runs, vec![1, 2, 1, 1]);
     }
 
     /// Loads Fira Code into iced's font system, as the app does at startup.

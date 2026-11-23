@@ -7,6 +7,7 @@ mod diff;
 mod file_icon;
 mod panels;
 mod sidebar;
+mod sticky;
 mod watch;
 
 use std::collections::HashSet;
