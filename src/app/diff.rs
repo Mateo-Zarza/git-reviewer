@@ -1,6 +1,7 @@
 //! The right panel: the selected file's diff.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
@@ -34,17 +35,32 @@ const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
     + layouts::DIFF_SIGN_WIDTH;
 const CODE_PADDING_RIGHT: f32 = 24.0;
 
+/// How many diff lines go in one `Chunk`.
+const CHUNK_LINES: usize = 64;
+
 /// The selected file's diff, laid out the way `diff_body` draws it. `load_diff` builds
 /// it once per diff, so `view`, which runs after every message, does no per-line work.
 ///
-/// Each column (old numbers, new numbers, signs, code) is a single text with one line
-/// per diff line, not a row of widgets per line: a whole file would be tens of thousands
-/// of widgets, rebuilt after every message, and iced has no virtual list. Every line is
-/// `DIFF_LINE_HEIGHT` tall, so the columns line up, and the tints behind them are one
-/// block per run of same-kind lines (blocks without text, so even thousands are cheap).
+/// The text is cut into chunks of `CHUNK_LINES` lines, and only the chunks around what's
+/// visible are put on screen (see `ChunkWindow`). Shaping text is what costs (around
+/// 60ms per 1000 lines in a release build, measured), and it happens for every text
+/// widget that's laid out, visible or not: shaping a whole 5000-line file took over
+/// 0.3s, and much longer in a debug build. Behind the text, the tints are one block per
+/// run of same-kind lines for the whole file: blocks without text, so even thousands
+/// are cheap. Every line is `DIFF_LINE_HEIGHT` tall, so it all lines up.
 pub(super) struct DiffView {
     added: usize,
     removed: usize,
+    chunks: Vec<Chunk>,
+    runs: Vec<Run>,
+    /// How wide the rows must be to fit the longest line, gutter and padding included.
+    width: f32,
+}
+
+/// `CHUNK_LINES` consecutive diff lines (the last chunk may have fewer), one text per
+/// column, with one line per diff line. One text per column rather than a row of
+/// widgets per line keeps the widget count low.
+struct Chunk {
     old_numbers: String,
     new_numbers: String,
     /// The sign column is two texts drawn over each other, since a text has one color:
@@ -52,9 +68,30 @@ pub(super) struct DiffView {
     plus_signs: String,
     minus_signs: String,
     code: String,
-    runs: Vec<Run>,
-    /// How wide the rows must be to fit the longest line, gutter and padding included.
-    width: f32,
+}
+
+impl Chunk {
+    fn new(lines: &[DiffLine]) -> Chunk {
+        let column =
+            |cell: fn(&DiffLine) -> String| lines.iter().map(cell).collect::<Vec<_>>().join("\n");
+        fn number(number: Option<usize>) -> String {
+            number.map(|n| n.to_string()).unwrap_or_default()
+        }
+
+        Chunk {
+            old_numbers: column(|line| number(line.old_number())),
+            new_numbers: column(|line| number(line.new_number())),
+            plus_signs: column(|line| match line {
+                DiffLine::Added { .. } => "+".to_string(),
+                _ => String::new(),
+            }),
+            minus_signs: column(|line| match line {
+                DiffLine::Removed { .. } => "−".to_string(),
+                _ => String::new(),
+            }),
+            code: column(|line| display_text(line.text())),
+        }
+    }
 }
 
 /// Consecutive diff lines of the same kind.
@@ -83,12 +120,6 @@ impl Kind {
 impl DiffView {
     pub(super) fn new(diff: &Diff) -> DiffView {
         let (added, removed) = diff.counts();
-        let column = |cell: fn(&DiffLine) -> String| {
-            diff.lines.iter().map(cell).collect::<Vec<_>>().join("\n")
-        };
-        fn number(number: Option<usize>) -> String {
-            number.map(|n| n.to_string()).unwrap_or_default()
-        }
 
         let mut runs: Vec<Run> = Vec::new();
         for kind in diff.lines.iter().map(Kind::of) {
@@ -101,17 +132,7 @@ impl DiffView {
         DiffView {
             added,
             removed,
-            old_numbers: column(|line| number(line.old_number())),
-            new_numbers: column(|line| number(line.new_number())),
-            plus_signs: column(|line| match line {
-                DiffLine::Added { .. } => "+".to_string(),
-                _ => String::new(),
-            }),
-            minus_signs: column(|line| match line {
-                DiffLine::Removed { .. } => "−".to_string(),
-                _ => String::new(),
-            }),
-            code: column(|line| display_text(line.text())),
+            chunks: diff.lines.chunks(CHUNK_LINES).map(Chunk::new).collect(),
             runs,
             width: content_width(diff),
         }
@@ -151,7 +172,7 @@ impl App {
         column![
             diff_header(path, *source, diff),
             rule::horizontal(1).style(theme::divider),
-            diff_body(diff),
+            diff_body(diff, self.diff_scroll_y),
         ]
         .into()
     }
@@ -232,35 +253,33 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Elemen
 }
 
 /// The whole file, scrollable both ways: the gutter (line numbers and signs) and the
-/// code, each a few texts over a column of tint blocks (see `DiffView`). The gutter
-/// stays at the left edge when scrolled sideways.
+/// code, each the visible chunks' texts over a column of tint blocks (see `DiffView`).
+/// The gutter stays at the left edge when scrolled sideways. `scroll_y` is how far down
+/// it's scrolled, which decides the chunks that are built.
 ///
 /// Lines don't wrap, so the code is as wide as its longest line (`DiffView::width`), or
 /// the panel if that's wider, so the tints run edge to edge. (Nothing can just be `Fill`:
 /// inside a both-ways scrollable that lays out empty.)
-fn diff_body(diff: &DiffView) -> Element<'_, Message> {
+fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
     responsive(move |size| {
         let tint_width = diff.width.max(size.width) - GUTTER_WIDTH;
+        // A fixed width, so the text's bounds don't change when the panel is resized:
+        // that would make iced lay out every line again.
+        let code_width = diff.width - GUTTER_WIDTH;
+        let window = ChunkWindow::new(scroll_y, size.height, diff.chunks.len());
 
-        // In a `stack`, the first layer sets the size, and the rest are drawn over it.
-        let gutter = stack![
-            column(diff.runs.iter().map(gutter_run)),
-            row![
-                line_numbers(&diff.old_numbers, OLD_NUMBER_PADDING),
-                line_numbers(&diff.new_numbers, NEW_NUMBER_PADDING),
-                stack![
-                    mono(diff.plus_signs.as_str()).color(colors::ADDED),
-                    mono(diff.minus_signs.as_str()).color(colors::DELETED),
-                ]
-                .width(layouts::DIFF_SIGN_WIDTH),
-            ],
-        ];
-        let code = stack![
-            column(diff.runs.iter().map(|run| code_tint(run, tint_width))),
-            // A fixed width, so the text's bounds don't change when the panel is
-            // resized: that would make iced lay out every line again.
-            mono(diff.code.as_str()).width(diff.width - GUTTER_WIDTH),
-        ];
+        // In a `stack`, the first layer sets the size (here, the whole file's), and the
+        // rest are drawn over it.
+        let gutter = stack(
+            std::iter::once(column(diff.runs.iter().map(gutter_run)).into())
+                .chain(window.layers(&diff.chunks, gutter_chunk)),
+        );
+        let code = stack(
+            std::iter::once(column(diff.runs.iter().map(|run| code_tint(run, tint_width))).into())
+                .chain(window.layers(&diff.chunks, |chunk| {
+                    mono(chunk.code.as_str()).width(code_width).into()
+                })),
+        );
 
         // The gutter goes over a gap left for it, as a `Sticky` stack layer, so it stays
         // put when the code is scrolled sideways.
@@ -272,6 +291,7 @@ fn diff_body(diff: &DiffView) -> Element<'_, Message> {
                 vertical: theme::thin_scrollbar(),
                 horizontal: theme::thin_scrollbar(),
             })
+            .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
             .style(theme::scrollbar)
             .width(Fill)
             .height(Fill)
@@ -280,9 +300,80 @@ fn diff_body(diff: &DiffView) -> Element<'_, Message> {
     .into()
 }
 
+/// The chunks put on screen: the ones the visible area touches, plus one more on each
+/// side as a margin.
+///
+/// Each chunk is a `stack` layer pushed down to its place, and chunk `i` always goes in
+/// layer `i % slots`. Scrolling one chunk further then changes the content of one layer
+/// only: the others keep theirs, so iced keeps their shaped text and shapes just the
+/// new chunk. (In a `column`, every chunk would move up one place, and iced matches
+/// widgets to their previous state by place, so all of them would be shaped again.
+/// `keyed_column` doesn't help: it only follows a single insert or removal.)
+///
+/// iced handles the scroll message and rebuilds the view before drawing the frame,
+/// so the chunks are in place on the same frame the scroll shows.
+#[derive(Debug, PartialEq)]
+struct ChunkWindow {
+    chunks: Range<usize>,
+    slots: usize,
+}
+
+impl ChunkWindow {
+    /// The window for a viewport `height` tall, scrolled `scroll_y` down, over `count`
+    /// chunks. It's kept within the file, so a stale `scroll_y` (the file got shorter
+    /// and the scrollable clamped its offset) still covers the end, where it now is.
+    fn new(scroll_y: f32, height: f32, count: usize) -> ChunkWindow {
+        let chunk_height = lines_height(CHUNK_LINES);
+        // A viewport touches at most `ceil(height / chunk_height) + 1` chunks, and
+        // there's one more on each side. Never more slots than chunks (and at least
+        // one), so an unbounded `height` can't overflow or allocate endless slots.
+        let slots = ((height / chunk_height).ceil() as usize)
+            .saturating_add(3)
+            .min(count.max(1));
+        let first = ((scroll_y / chunk_height) as usize)
+            .saturating_sub(1)
+            .min(count.saturating_sub(slots));
+        ChunkWindow {
+            chunks: first..(first + slots).min(count),
+            slots,
+        }
+    }
+
+    /// One stack layer per slot: the chunk `draw` makes, moved down to its place, or
+    /// nothing if no chunk in the window uses that slot.
+    fn layers<'a>(
+        &self,
+        chunks: &'a [Chunk],
+        draw: impl Fn(&'a Chunk) -> Element<'a, Message>,
+    ) -> Vec<Element<'a, Message>> {
+        let mut layers: Vec<Element<'a, Message>> =
+            (0..self.slots).map(|_| space().into()).collect();
+        for index in self.chunks.clone() {
+            layers[index % self.slots] = container(draw(&chunks[index]))
+                .padding(Padding::ZERO.top(lines_height(index * CHUNK_LINES)))
+                .into();
+        }
+        layers
+    }
+}
+
 /// The height of `lines` diff lines.
 fn lines_height(lines: usize) -> f32 {
     lines as f32 * layouts::DIFF_LINE_HEIGHT
+}
+
+/// One chunk's line numbers and signs.
+fn gutter_chunk(chunk: &Chunk) -> Element<'_, Message> {
+    row![
+        line_numbers(&chunk.old_numbers, OLD_NUMBER_PADDING),
+        line_numbers(&chunk.new_numbers, NEW_NUMBER_PADDING),
+        stack![
+            mono(chunk.plus_signs.as_str()).color(colors::ADDED),
+            mono(chunk.minus_signs.as_str()).color(colors::DELETED),
+        ]
+        .width(layouts::DIFF_SIGN_WIDTH),
+    ]
+    .into()
 }
 
 /// One run's stretch of the gutter background. It's opaque even for unchanged lines,
@@ -436,13 +527,55 @@ mod tests {
         let view = DiffView::new(&diff);
 
         assert_eq!((view.added, view.removed), (1, 2));
-        assert_eq!(view.old_numbers, "1\n2\n3\n\n4");
-        assert_eq!(view.new_numbers, "1\n\n\n2\n3");
-        assert_eq!(view.code, "same\nold\nolder\nnew\n");
-        assert_eq!(view.plus_signs, "\n\n\n+\n");
-        assert_eq!(view.minus_signs, "\n−\n−\n\n");
+        assert_eq!(view.chunks.len(), 1);
+        let chunk = &view.chunks[0];
+        assert_eq!(chunk.old_numbers, "1\n2\n3\n\n4");
+        assert_eq!(chunk.new_numbers, "1\n\n\n2\n3");
+        assert_eq!(chunk.code, "same\nold\nolder\nnew\n");
+        assert_eq!(chunk.plus_signs, "\n\n\n+\n");
+        assert_eq!(chunk.minus_signs, "\n−\n−\n\n");
         let runs: Vec<_> = view.runs.iter().map(|run| run.lines).collect();
         assert_eq!(runs, vec![1, 2, 1, 1]);
+    }
+
+    #[test]
+    fn test_chunks_split_every_chunk_lines() {
+        let diff = Diff {
+            lines: (1..=CHUNK_LINES * 2 + 1)
+                .map(|n| DiffLine::Context {
+                    old: n,
+                    new: n,
+                    text: n.to_string(),
+                })
+                .collect(),
+        };
+        let view = DiffView::new(&diff);
+
+        assert_eq!(view.chunks.len(), 3);
+        assert!(view.chunks[1].old_numbers.starts_with("65\n"));
+        assert_eq!(view.chunks[2].code, "129");
+    }
+
+    #[test]
+    fn test_chunk_window_covers_the_viewport_plus_a_margin() {
+        let chunk = lines_height(CHUNK_LINES);
+        // A viewport under one chunk tall: up to 2 chunks touched, plus 1 each side.
+        let window = |scroll_y: f32, count| ChunkWindow::new(scroll_y, chunk / 2.0, count);
+
+        assert_eq!(
+            window(0.0, 100),
+            ChunkWindow {
+                chunks: 0..4,
+                slots: 4
+            }
+        );
+        // Scrolled into chunk 10: from chunk 9 (the margin above) on.
+        assert_eq!(window(chunk * 10.5, 100).chunks, 9..13);
+        // Past the end (a stale offset): the last chunks.
+        assert_eq!(window(chunk * 500.0, 100).chunks, 96..100);
+        // A file shorter than the window.
+        assert_eq!(window(0.0, 2).chunks, 0..2);
+        assert_eq!(window(0.0, 0).chunks, 0..0);
     }
 
     /// Loads Fira Code into iced's font system, as the app does at startup.

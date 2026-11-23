@@ -41,6 +41,8 @@ pub enum Message {
         path: String,
         source: DiffSource,
     },
+    /// The diff was scrolled; how far down it is now, in pixels.
+    DiffScrolled(f32),
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -165,6 +167,9 @@ pub struct App {
     config_is_writable: bool,
     /// The selected file's diff, already laid out for drawing (see `diff::DiffView`).
     diff: Option<Result<DiffView, GitError>>,
+    /// How far down the diff is scrolled, in pixels: only the lines around it are built
+    /// (see `diff::chunk_layers`).
+    diff_scroll_y: f32,
     error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
@@ -235,6 +240,7 @@ impl App {
             config,
             config_is_writable,
             diff: None,
+            diff_scroll_y: 0.0,
             error,
             commit_message: text_editor::Content::new(),
             base_counts: None,
@@ -405,8 +411,10 @@ impl App {
                 self.load_diff();
                 // iced keeps a scrollable's offset across content changes, so a newly
                 // opened file would start wherever the previous one was scrolled to.
+                self.diff_scroll_y = 0.0;
                 return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
+            Message::DiffScrolled(y) => self.diff_scroll_y = y,
             Message::Stage(path) => {
                 if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
                     self.report(result);
