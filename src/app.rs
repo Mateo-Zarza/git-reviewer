@@ -1020,10 +1020,6 @@ fn removal_question(plan: &RemovalPlan) -> String {
 /// The discard confirmation, saying exactly what the plan will lose.
 fn discard_question(plan: &DiscardPlan) -> String {
     match plan.files.as_slice() {
-        [(path, true)] if path.ends_with('/') => format!(
-            "Delete the untracked folder {path} and everything in it (except ignored \
-             files)?\n\n{WARNING}"
-        ),
         [(path, true)] => format!("Delete the untracked file {path}?\n\n{WARNING}"),
         [(path, false)] => format!("Discard the changes in {path}?\n\n{WARNING}"),
         files => {

@@ -55,6 +55,8 @@ pub(super) struct DiffView {
     runs: Vec<Run>,
     /// How wide the rows must be to fit the longest line, gutter and padding included.
     width: f32,
+    /// A binary file: a message is shown instead of lines (it has none).
+    binary: bool,
 }
 
 /// `CHUNK_LINES` consecutive diff lines (the last chunk may have fewer), one text per
@@ -135,6 +137,7 @@ impl DiffView {
             chunks: diff.lines.chunks(CHUNK_LINES).map(Chunk::new).collect(),
             runs,
             width: content_width(diff),
+            binary: diff.binary,
         }
     }
 }
@@ -169,10 +172,18 @@ impl App {
             }
         };
 
+        let body = if diff.binary {
+            empty_state("Binary file not shown", colors::TEXT_MUTED)
+                .center(Fill)
+                .into()
+        } else {
+            diff_body(diff, self.diff_scroll_y)
+        };
+
         column![
             diff_header(path, *source, diff),
             rule::horizontal(1).style(theme::divider),
-            diff_body(diff, self.diff_scroll_y),
+            body,
         ]
         .into()
     }
@@ -227,6 +238,19 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Elemen
         DiffSource::Untracked => "Untracked",
     };
 
+    // A binary file has no lines to count; +0 −0 would read as "nothing changed".
+    let counts = (!diff.binary).then(|| {
+        row![
+            text(format!("+{}", diff.added))
+                .size(text_sizes::SMALL)
+                .color(colors::ADDED),
+            text(format!("−{}", diff.removed))
+                .size(text_sizes::SMALL)
+                .color(colors::DANGER),
+        ]
+        .spacing(10)
+    });
+
     container(
         row![
             ellipsized_text(path)
@@ -236,13 +260,8 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Elemen
                 .padding([1.0, 6.0])
                 .style(theme::filled_tag),
             space().width(Fill),
-            text(format!("+{}", diff.added))
-                .size(text_sizes::SMALL)
-                .color(colors::ADDED),
-            text(format!("−{}", diff.removed))
-                .size(text_sizes::SMALL)
-                .color(colors::DANGER),
         ]
+        .push(counts)
         .spacing(10)
         .align_y(Center),
     )
@@ -523,6 +542,7 @@ mod tests {
                     text: String::new(),
                 },
             ],
+            binary: false,
         };
         let view = DiffView::new(&diff);
 
@@ -548,6 +568,7 @@ mod tests {
                     text: n.to_string(),
                 })
                 .collect(),
+            binary: false,
         };
         let view = DiffView::new(&diff);
 
