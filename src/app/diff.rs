@@ -1,13 +1,13 @@
 //! The right panel: the selected file's diff.
 
 use std::borrow::Cow;
+use std::f32::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
-use std::thread;
+use std::time::{Duration, Instant};
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
-use iced::futures::channel::oneshot;
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
 use iced::widget::{
@@ -15,16 +15,17 @@ use iced::widget::{
 };
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Padding, Pixels, Size, Task,
+    Color, Element, Fill, Padding, Pixels, Radians, Rotation, Size, Task,
     alignment::{Horizontal::Right, Vertical},
 };
 use iced_palace::widget::ellipsized_text;
 
 use super::sticky::sticky;
-use super::{App, Message, empty_state};
+use super::{App, Message, empty_state, on_thread};
 use crate::git::{Diff, DiffLine, DiffSource};
 use crate::highlight::{self, LineColors};
-use crate::theme::{self, colors, fonts, layouts, text_sizes};
+use crate::theme::icons::{self, icon};
+use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 
 /// Lets `update` reset the diff's scroll position when another file is opened.
 pub(super) const DIFF_SCROLLABLE: &str = "diff";
@@ -53,12 +54,15 @@ const CHUNK_LINES: usize = 64;
 /// run of same-kind lines for the whole file: blocks without text, so even thousands
 /// are cheap. Every line is `DIFF_LINE_HEIGHT` tall, so it all lines up.
 pub(super) struct DiffView {
-    /// The file's path and its diff as git gave it, kept to tell whether a reload
-    /// changed anything and to work out the syntax colors.
+    /// Which file and side this is, and its diff as git gave it: kept to tell whether a
+    /// reload changed anything, and to work out the syntax colors.
     path: String,
+    source: DiffSource,
     diff: Arc<Diff>,
-    /// Whether `start_highlighting` has run.
-    highlighting_started: bool,
+    highlighting: Highlighting,
+    /// A newer version of this same diff, shown in its place once it's highlighted (see
+    /// `replace_when_highlighted`).
+    next: Option<Box<DiffView>>,
     added: usize,
     removed: usize,
     chunks: Vec<Chunk>,
@@ -185,10 +189,23 @@ impl Kind {
     }
 }
 
+/// Where a `DiffView`'s syntax colors are at. Until they're done, its code isn't shown
+/// (`diff_panel` shows `loading` instead), the way VS Code doesn't show a file before
+/// it's colored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Highlighting {
+    NotStarted,
+    /// Since when.
+    Running(Instant),
+    /// Colored, or left in the default text color: not a language we highlight, or the
+    /// highlighter failed.
+    Done,
+}
+
 impl DiffView {
-    /// The diff of the file at `path`, its code in the default text color until
-    /// `start_highlighting`'s colors come in.
-    pub(super) fn new(path: &str, diff: Diff) -> DiffView {
+    /// The diff of `source`'s side of the file at `path`. Unless it's in a language we
+    /// don't highlight, it's loading until `start_highlighting`'s colors come in.
+    pub(super) fn new(path: &str, source: DiffSource, diff: Diff) -> DiffView {
         let (added, removed) = diff.counts();
 
         let mut runs: Vec<Run> = Vec::new();
@@ -199,57 +216,96 @@ impl DiffView {
             }
         }
 
+        let highlighting = if highlight::highlights(path, &diff) {
+            Highlighting::NotStarted
+        } else {
+            Highlighting::Done
+        };
+
         DiffView {
             path: path.to_string(),
+            source,
             added,
             removed,
             chunks: chunks(&diff, None),
             runs,
             width: content_width(&diff),
             diff: Arc::new(diff),
-            highlighting_started: false,
+            highlighting,
+            next: None,
         }
     }
 
-    /// Whether this already shows `diff` of the file at `path`. A reload that changed
-    /// nothing (most refreshes) then keeps it, colors and all.
-    pub(super) fn shows(&self, path: &str, diff: &Diff) -> bool {
-        self.path == path && *self.diff == *diff
+    /// Whether this is a diff of `source`'s side of the file at `path`.
+    pub(super) fn is_of(&self, path: &str, source: DiffSource) -> bool {
+        self.path == path && self.source == source
     }
 
-    /// The task that works out the code's syntax colors, off the UI thread, since that
-    /// can take a while (up to 0.7 s for both sides of a 5000-line file). `None` once
-    /// it's been started. The result comes back as `Message::DiffHighlighted`.
+    /// Whether this (or the newer version waiting to replace it) already is `diff` of
+    /// that file and side. A reload that changed nothing (most refreshes) then keeps it,
+    /// colors and all.
+    pub(super) fn shows(&self, path: &str, source: DiffSource, diff: &Diff) -> bool {
+        let newest = self.next.as_deref().unwrap_or(self);
+        newest.is_of(path, source) && *newest.diff == *diff
+    }
+
+    /// How long the code has been loading (see `Highlighting`), or `None` once it's
+    /// shown.
+    pub(super) fn loading_for(&self) -> Option<Duration> {
+        match self.highlighting {
+            Highlighting::NotStarted => Some(Duration::ZERO),
+            Highlighting::Running(since) => Some(since.elapsed()),
+            Highlighting::Done => None,
+        }
+    }
+
+    /// Keeps this on screen until `next`, a newer version of the same diff, is
+    /// highlighted, then shows `next` in its place. A refresh of the file being read
+    /// (it was saved, say) then never takes its code off the screen, nor its scroll
+    /// position, which a loading spinner would reset.
+    pub(super) fn replace_when_highlighted(&mut self, next: DiffView) {
+        self.next = Some(Box::new(next));
+    }
+
+    /// The task that works out the code's syntax colors, on a thread of its own (see
+    /// `on_thread`), since that can take a while (up to 0.7 s for both sides of a
+    /// 5000-line file). `None` if there's nothing to start: it's already been started,
+    /// or it's not a language we highlight. The result comes back as
+    /// `Message::DiffHighlighted`.
     pub(super) fn start_highlighting(&mut self) -> Option<Task<Message>> {
-        if self.highlighting_started {
+        if let Some(next) = &mut self.next {
+            return next.start_highlighting();
+        }
+        if self.highlighting != Highlighting::NotStarted {
             return None;
         }
-        self.highlighting_started = true;
+        self.highlighting = Highlighting::Running(Instant::now());
 
-        // On a thread of its own. iced polls a new task once on the UI thread, before
-        // handing it to its thread pool (iced_winit's `update`), so the work in an
-        // `async` block that never waits would run right there and freeze the app.
-        // Waiting on the channel makes that first poll return at once instead.
-        let (sender, receiver) = oneshot::channel();
         let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
-        thread::spawn(move || {
-            // An error only means the app no longer waits for it.
-            let _ = sender.send(highlight::diff_colors(&path, &diff));
-        });
-
+        let work = move || highlight::diff_colors(&path, &diff);
         let diff = Arc::clone(&self.diff);
-        // If the thread panicked (its message is printed), the code stays uncolored.
-        Some(Task::perform(receiver, move |colors| {
-            Message::DiffHighlighted(diff, colors.ok().flatten())
-        }))
+        // A panicked thread leaves the code in the default text color.
+        let done =
+            move |colors: Option<_>| Message::DiffHighlighted(Arc::clone(&diff), colors.flatten());
+        Some(on_thread(work).map(done))
     }
 
-    /// Colors the code with what `start_highlighting` worked out for `diff`, unless
-    /// that's not the diff shown any more (another file was opened, or this one changed,
-    /// while it ran).
-    pub(super) fn set_colors(&mut self, diff: &Arc<Diff>, colors: &[LineColors]) {
+    /// Colors the code with what `start_highlighting` worked out for `diff` (`None`:
+    /// no colors, so the default text color) and shows it. Ignored if `diff` is
+    /// neither this diff nor its newer version: another file was opened, or this one
+    /// changed again, while it ran.
+    pub(super) fn set_colors(&mut self, diff: &Arc<Diff>, colors: Option<&[LineColors]>) {
         if Arc::ptr_eq(&self.diff, diff) {
-            self.chunks = chunks(&self.diff, Some(colors));
+            if let Some(colors) = colors {
+                self.chunks = chunks(&self.diff, Some(colors));
+            }
+            self.highlighting = Highlighting::Done;
+        } else if let Some(mut next) = self.next.take() {
+            next.set_colors(diff, colors);
+            match next.loading_for() {
+                Some(_) => self.next = Some(next),
+                None => *self = *next,
+            }
         }
     }
 }
@@ -297,7 +353,10 @@ impl App {
         column![
             diff_header(path, *source, diff),
             rule::horizontal(1).style(theme::divider),
-            diff_body(diff, self.diff_scroll_y),
+            match diff.loading_for() {
+                Some(elapsed) => loading(elapsed),
+                None => diff_body(diff, self.diff_scroll_y),
+            },
         ]
         .into()
     }
@@ -343,6 +402,27 @@ fn measure(shown: &str) -> f32 {
         wrapping: Wrapping::None,
     })
     .min_width()
+}
+
+/// How long the diff's body stays empty before its loading spinner shows, so a file
+/// that's quick to highlight (most are, in well under this) doesn't flash one.
+const SPINNER_DELAY: Duration = Duration::from_millis(150);
+
+/// The diff's body while its code is loading (see `Highlighting`), `elapsed` in: empty
+/// at first (see `SPINNER_DELAY`), then a spinner turning once a second. `App::
+/// subscription` redraws it every frame meanwhile.
+fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
+    if elapsed < SPINNER_DELAY {
+        return space().width(Fill).height(Fill).into();
+    }
+
+    let angle = elapsed.as_secs_f32() * TAU;
+    container(
+        icon(icons::SPINNER, icon_sizes::SPINNER, colors::TEXT_MUTED)
+            .rotation(Rotation::Floating(Radians(angle))),
+    )
+    .center(Fill)
+    .into()
 }
 
 fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Element<'a, Message> {
@@ -681,7 +761,7 @@ mod tests {
                 },
             ],
         };
-        let view = DiffView::new("x", diff);
+        let view = DiffView::new("x", DiffSource::Unstaged, diff);
 
         assert_eq!((view.added, view.removed), (1, 2));
         assert_eq!(view.chunks.len(), 1);
@@ -708,7 +788,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let view = DiffView::new("x", diff);
+        let view = DiffView::new("x", DiffSource::Unstaged, diff);
 
         assert_eq!(view.chunks.len(), 3);
         assert!(view.chunks[1].old_numbers.starts_with("65\n"));
@@ -755,34 +835,78 @@ mod tests {
         // Only the last line (alone in the second chunk) is colored.
         let mut colors = vec![LineColors::new(); diff.lines.len()];
         colors[CHUNK_LINES] = vec![(0..2, red)];
-        let mut view = DiffView::new("x.rs", diff);
+        let mut view = DiffView::new("x.rs", DiffSource::Unstaged, diff);
+        assert!(view.loading_for().is_some());
 
         // Colors worked out for another diff (one shown before) are dropped.
-        view.set_colors(&Arc::new(Diff { lines: Vec::new() }), &colors);
+        view.set_colors(&Arc::new(Diff { lines: Vec::new() }), Some(&colors));
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, None)]);
+        assert!(view.loading_for().is_some());
 
         let shown = Arc::clone(&view.diff);
-        view.set_colors(&shown, &colors);
+        view.set_colors(&shown, Some(&colors));
         assert_eq!(view.chunks[0].code.colors.len(), 1);
         assert_eq!(view.chunks[0].code.colors[0].1, None);
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, Some(red))]);
+        assert!(view.loading_for().is_none());
+    }
+
+    /// A one-line Rust diff.
+    fn rust_diff(text: &str) -> Diff {
+        Diff {
+            lines: vec![DiffLine::Added {
+                new: 1,
+                text: text.to_string(),
+            }],
+        }
     }
 
     #[test]
     fn test_reloads_are_recognized_and_highlighting_starts_once() {
-        let diff = || Diff {
-            lines: vec![DiffLine::Added {
-                new: 1,
-                text: "fn main() {}".to_string(),
-            }],
-        };
-        let mut view = DiffView::new("main.rs", diff());
+        let diff = || rust_diff("fn main() {}");
+        let mut view = DiffView::new("main.rs", DiffSource::Staged, diff());
 
-        assert!(view.shows("main.rs", &diff()));
-        assert!(!view.shows("lib.rs", &diff()));
-        assert!(!view.shows("main.rs", &Diff { lines: Vec::new() }));
+        assert!(view.shows("main.rs", DiffSource::Staged, &diff()));
+        assert!(!view.shows("main.rs", DiffSource::Unstaged, &diff()));
+        assert!(!view.shows("lib.rs", DiffSource::Staged, &diff()));
+        assert!(!view.shows("main.rs", DiffSource::Staged, &rust_diff("")));
         assert!(view.start_highlighting().is_some());
         assert!(view.start_highlighting().is_none());
+        assert!(view.loading_for().is_some());
+    }
+
+    #[test]
+    fn test_files_we_dont_highlight_are_never_loading() {
+        let mut view = DiffView::new("notes.txt", DiffSource::Unstaged, rust_diff("plain"));
+
+        assert!(view.loading_for().is_none());
+        assert!(view.start_highlighting().is_none());
+    }
+
+    #[test]
+    fn test_a_newer_version_replaces_the_shown_one_once_highlighted() {
+        let source = DiffSource::Unstaged;
+        let mut view = DiffView::new("main.rs", source, rust_diff("fn old() {}"));
+        let old = Arc::clone(&view.diff);
+        view.set_colors(&old, None);
+
+        view.replace_when_highlighted(DiffView::new("main.rs", source, rust_diff("fn new() {}")));
+        // The old version stays on screen, while reloads compare with the new one.
+        assert!(view.loading_for().is_none());
+        assert!(Arc::ptr_eq(&view.diff, &old));
+        assert!(view.shows("main.rs", source, &rust_diff("fn new() {}")));
+        // Highlighting starts for the new version.
+        assert!(view.start_highlighting().is_some());
+
+        // Stale colors (for the old version) change nothing.
+        view.set_colors(&old, None);
+        assert!(Arc::ptr_eq(&view.diff, &old));
+
+        let new = Arc::clone(&view.next.as_ref().expect("waiting").diff);
+        view.set_colors(&new, None);
+        assert!(Arc::ptr_eq(&view.diff, &new));
+        assert!(view.next.is_none());
+        assert!(view.loading_for().is_none());
     }
 
     #[test]

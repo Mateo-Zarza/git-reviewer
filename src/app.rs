@@ -510,12 +510,11 @@ impl App {
                 return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
             }
             Message::DiffScrolled(y) => self.diff_scroll_y = y,
-            Message::DiffHighlighted(diff, Some(colors)) => {
+            Message::DiffHighlighted(diff, colors) => {
                 if let Some(Ok(view)) = &mut self.diff {
-                    view.set_colors(&diff, &colors);
+                    view.set_colors(&diff, colors.as_deref());
                 }
             }
-            Message::DiffHighlighted(_, None) => {} // stays in the default text color
             Message::Stage(path) => {
                 if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
                     self.report(result);
@@ -737,11 +736,13 @@ impl App {
         // running watcher instead of restarting it on every refresh.
         paths.sort();
 
-        // A message per frame only while a Sync/Publish runs, to animate its icon;
-        // idle, the app draws nothing.
-        let spinner = match self.remote_op {
-            Some(_) => window::frames().map(|_| Message::Tick),
-            None => Subscription::none(),
+        // A message per frame only while a Sync/Publish runs or the diff is loading, to
+        // animate their spinners; idle, the app draws nothing.
+        let diff_loading = matches!(&self.diff, Some(Ok(diff)) if diff.loading_for().is_some());
+        let spinner = if self.remote_op.is_some() || diff_loading {
+            window::frames().map(|_| Message::Tick)
+        } else {
+            Subscription::none()
         };
 
         Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
@@ -1006,10 +1007,39 @@ impl App {
             return;
         };
 
-        match selected.diff(file, *source) {
+        let source = *source;
+        match selected.diff(file, source) {
             // Nothing changed (most refreshes): keep what's on screen, colors and all.
-            Ok(diff) if matches!(&self.diff, Some(Ok(view)) if view.shows(file, &diff)) => {}
-            result => self.diff = Some(result.map(|diff| DiffView::new(file, diff))),
+            Ok(diff) if matches!(&self.diff, Some(Ok(view)) if view.shows(file, source, &diff)) => {
+            }
+            Ok(diff) => {
+                let new = DiffView::new(file, source, diff);
+                match &mut self.diff {
+                    // The file on screen changed: it stays until the new version is
+                    // ready (see `DiffView::replace_when_highlighted`).
+                    Some(Ok(view))
+                        if view.is_of(file, source)
+                            && view.loading_for().is_none()
+                            && new.loading_for().is_some() =>
+                    {
+                        view.replace_when_highlighted(new);
+                    }
+                    _ => {
+                        // The scrollable (and where it's scrolled to) only carries over
+                        // if both diffs are shown. Otherwise one isn't there for a while
+                        // (an error, or a loading diff, sits in its place), and the new
+                        // one starts at the top.
+                        let shown = |view: &DiffView| view.loading_for().is_none();
+                        let keeps_scrollable =
+                            matches!(&self.diff, Some(Ok(view)) if shown(view)) && shown(&new);
+                        if !keeps_scrollable {
+                            self.diff_scroll_y = 0.0;
+                        }
+                        self.diff = Some(Ok(new));
+                    }
+                }
+            }
+            Err(err) => self.diff = Some(Err(err)),
         }
     }
 

@@ -41,8 +41,7 @@ pub type LineColors = Vec<(Range<usize>, Color)>;
 /// from the old file (unchanged + removed lines), the rest from the new file (unchanged
 /// + added lines).
 pub fn diff_colors(path: &str, diff: &Diff) -> Option<Vec<LineColors>> {
-    let first_line = diff.lines.first().map_or("", DiffLine::text);
-    let syntax = syntax_for(path, first_line)?;
+    let syntax = syntax_for(path, first_line(diff))?;
 
     let mut colors = vec![LineColors::new(); diff.lines.len()];
     // The old file first, but only up to its last removed line: the lines after it are
@@ -57,6 +56,17 @@ pub fn diff_colors(path: &str, diff: &Diff) -> Option<Vec<LineColors>> {
     highlight_side(syntax, old_side, DiffLine::old_number, &mut colors);
     highlight_side(syntax, &diff.lines, DiffLine::new_number, &mut colors);
     Some(colors)
+}
+
+/// Whether `diff_colors` would color `diff` of the file at `path`: whether it's in a
+/// language we highlight. Quick, unlike `diff_colors`.
+pub fn highlights(path: &str, diff: &Diff) -> bool {
+    syntax_for(path, first_line(diff)).is_some()
+}
+
+/// What the language is told from when the file name doesn't tell it (a shebang).
+fn first_line(diff: &Diff) -> &str {
+    diff.lines.first().map_or("", DiffLine::text)
 }
 
 /// The language of the file at `path` (a git path, `/`-separated): by its extension,
