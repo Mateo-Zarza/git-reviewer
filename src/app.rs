@@ -5,6 +5,7 @@
 mod changes;
 mod diff;
 mod file_icon;
+mod panels;
 mod sidebar;
 mod watch;
 
@@ -15,7 +16,9 @@ use std::path::{PathBuf, absolute};
 
 use iced::widget::operation;
 use iced::widget::scrollable::RelativeOffset;
-use iced::widget::{Container, button, column, container, row, rule, space, text, text_editor};
+use iced::widget::{
+    Container, button, column, container, row, rule, space, stack, text, text_editor,
+};
 use iced::{Alignment::Center, Color, Element, Fill, Subscription, Task, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::Instant;
@@ -25,6 +28,8 @@ use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DIFF_SCROLLABLE;
+pub use panels::min_window_width;
+use panels::{Divider, PanelWidths};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -65,6 +70,13 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
+    /// The mouse went down on a divider between panels.
+    DividerGrabbed(Divider),
+    /// The cursor's x while a divider is dragged.
+    DividerDragged(f32),
+    DividerReleased,
+    /// The window's new width.
+    WindowResized(f32),
 }
 
 /// A list section that folds away when its header is clicked, like VS Code's.
@@ -156,6 +168,13 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// The panel widths the user dragged to (what's shown may be narrower: see
+    /// `PanelWidths::fitted`).
+    panel_widths: PanelWidths,
+    /// The divider being dragged, if any.
+    dragging: Option<Divider>,
+    /// Infinite until the window first reports its size, which it does when it opens.
+    window_width: f32,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
@@ -214,6 +233,9 @@ impl App {
             base_counts: None,
             base_error: None,
             collapsed: HashSet::new(),
+            panel_widths: PanelWidths::default(),
+            dragging: None,
+            window_width: f32::INFINITY,
         };
         app.workspace = app.scan();
         app
@@ -550,15 +572,32 @@ impl App {
                     self.collapsed.insert(section);
                 }
             }
+            Message::DividerGrabbed(divider) => self.dragging = Some(divider),
+            Message::DividerDragged(x) => {
+                if let Some(divider) = self.dragging {
+                    self.panel_widths = self.panel_widths.dragged(divider, x, self.window_width);
+                }
+            }
+            Message::DividerReleased => self.dragging = None,
+            Message::WindowResized(width) => self.window_width = width,
         }
         Task::none()
     }
 
     /// Watches every worktree's folder so the app refreshes itself after edits or
-    /// terminal git commands.
+    /// terminal git commands; also follows the window's width, and the cursor while a
+    /// divider is dragged.
     pub fn subscription(&self) -> Subscription<Message> {
+        // Always on, even without a workspace: the window reports its first size once,
+        // when it opens.
+        let window_width = panels::window_width();
+        let drag = match self.dragging {
+            Some(_) => panels::drag_events(),
+            None => Subscription::none(),
+        };
+
         let Ok(workspace) = &self.workspace else {
-            return Subscription::none();
+            return Subscription::batch([window_width, drag]);
         };
 
         let mut paths: Vec<PathBuf> = workspace
@@ -578,7 +617,7 @@ impl App {
             None => Subscription::none(),
         };
 
-        Subscription::batch([watch::subscription(paths), spinner])
+        Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -610,26 +649,41 @@ impl App {
                 .center(Fill)
                 .into()
             }
-            Ok(workspace) => row![
-                self.sidebar(workspace),
-                rule::vertical(1).style(theme::divider),
-                container(self.changes_panel())
-                    .width(layouts::CHANGES_WIDTH)
-                    .height(Fill)
-                    .style(|_| container::background(colors::SURFACE)),
-                rule::vertical(1).style(theme::divider),
-                container(self.diff_panel()).width(Fill).height(Fill),
-            ]
-            .height(Fill)
-            .into(),
+            Ok(workspace) => {
+                let widths = self.panel_widths.fitted(self.window_width);
+                // The dividers' grab areas lie over the panels rather than between them.
+                stack![
+                    row![
+                        container(self.sidebar(workspace))
+                            .width(widths.sidebar)
+                            .height(Fill),
+                        rule::vertical(1).style(theme::divider),
+                        container(self.changes_panel())
+                            .width(widths.changes)
+                            .height(Fill)
+                            .style(|_| container::background(colors::SURFACE)),
+                        rule::vertical(1).style(theme::divider),
+                        container(self.diff_panel()).width(Fill).height(Fill),
+                    ]
+                    .height(Fill),
+                    panels::handles(widths),
+                ]
+                .into()
+            }
         };
 
-        column![
+        // Always a stack, so starting a drag only adds a layer on top: swapping in a
+        // different root widget would rebuild everything under it and lose scroll
+        // positions.
+        let mut screen = stack![column![
             self.top_bar(),
             rule::horizontal(1).style(theme::divider),
             body
-        ]
-        .into()
+        ]];
+        if self.dragging.is_some() {
+            screen = screen.push(panels::drag_overlay());
+        }
+        screen.into()
     }
 
     fn top_bar(&self) -> Element<'_, Message> {

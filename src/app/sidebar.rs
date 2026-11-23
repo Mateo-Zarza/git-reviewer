@@ -38,7 +38,7 @@ impl App {
             .direction(Direction::Vertical(theme::thin_scrollbar()))
             .style(theme::scrollbar),
         )
-        .width(layouts::SIDEBAR_WIDTH)
+        .width(Fill)
         .height(Fill)
         .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X])
         .style(|_| container::background(colors::SIDEBAR))
