@@ -115,9 +115,7 @@ impl Worktree {
                     .run(&["diff", "--cached", WHOLE_FILE, "--", path])?,
             ),
             DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", WHOLE_FILE, "--", path])?),
-            DiffSource::Untracked => {
-                Diff::from_new_file(&std::fs::read_to_string(self.path().join(path))?)
-            }
+            DiffSource::Untracked => Diff::from_new_file(&std::fs::read(self.path().join(path))?),
         })
     }
 
