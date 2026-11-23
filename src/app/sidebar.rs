@@ -54,10 +54,15 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element
         format!("{count} worktrees")
     };
 
+    // The name fills the row and is cut to fit, so the count chip always keeps its place
+    // at the end (a row lays out `Fill` children last, with whatever width is left).
     let header = button(
         row![
             chevron(open),
-            text(repo.name()).font(fonts::UI_SEMIBOLD),
+            ellipsized_text(repo.name())
+                .font(fonts::UI_SEMIBOLD)
+                .wrapping(Wrapping::None)
+                .width(Fill),
             text(count_label)
                 .size(text_sizes::SMALL)
                 .color(colors::TEXT_DIM),
