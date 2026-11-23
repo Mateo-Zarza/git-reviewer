@@ -6,9 +6,9 @@ use std::ops::Range;
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
 use iced::widget::scrollable::Direction;
-use iced::widget::text::{IntoFragment, LineHeight, Shaping, Wrapping};
+use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
 use iced::widget::{
-    Text, column, container, responsive, row, rule, scrollable, space, stack, text,
+    Text, column, container, responsive, rich_text, row, rule, scrollable, space, span, stack, text,
 };
 use iced::{
     Alignment::Center,
@@ -20,6 +20,7 @@ use iced_palace::widget::ellipsized_text;
 use super::sticky::sticky;
 use super::{App, Message, empty_state};
 use crate::git::{Diff, DiffLine, DiffSource};
+use crate::highlight::LineColors;
 use crate::theme::{self, colors, fonts, layouts, text_sizes};
 
 /// Lets `update` reset the diff's scroll position when another file is opened.
@@ -67,15 +68,27 @@ struct Chunk {
     /// green `+` on added lines and red `−` on removed ones, each blank elsewhere.
     plus_signs: String,
     minus_signs: String,
-    code: String,
+    /// The code, in its syntax colors.
+    code: ColoredText,
 }
 
 impl Chunk {
-    fn new(lines: &[DiffLine]) -> Chunk {
+    /// `colors` has the lines' syntax colors (see `highlight::diff_colors`), or is
+    /// `None` to draw them all in the default text color.
+    fn new(lines: &[DiffLine], colors: Option<&[LineColors]>) -> Chunk {
         let column =
             |cell: fn(&DiffLine) -> String| lines.iter().map(cell).collect::<Vec<_>>().join("\n");
         fn number(number: Option<usize>) -> String {
             number.map(|n| n.to_string()).unwrap_or_default()
+        }
+
+        let mut code = ColoredText::default();
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                code.push_newline();
+            }
+            let line_colors = colors.map_or(&[][..], |colors| colors[index].as_slice());
+            code.push_line(line.text(), line_colors);
         }
 
         Chunk {
@@ -89,7 +102,53 @@ impl Chunk {
                 DiffLine::Removed { .. } => "−".to_string(),
                 _ => String::new(),
             }),
-            code: column(|line| display_text(line.text())),
+            code,
+        }
+    }
+}
+
+/// Text built piece by piece, each piece in its own color, for a `rich_text`.
+#[derive(Default)]
+struct ColoredText {
+    text: String,
+    /// Byte ranges of `text`, in order and covering all of it, each with its color
+    /// (`None`: the default text color).
+    colors: Vec<(Range<usize>, Option<Color>)>,
+}
+
+impl ColoredText {
+    /// Adds a diff line as it's drawn (see `display_text`), in its syntax colors (see
+    /// `LineColors`), or in the default color if it has none.
+    fn push_line(&mut self, line: &str, colors: &[(Range<usize>, Color)]) {
+        let mut after_punctuation = false;
+        if colors.is_empty() {
+            self.push(line, None, &mut after_punctuation);
+        }
+        for (range, color) in colors {
+            self.push(&line[range.clone()], Some(*color), &mut after_punctuation);
+        }
+    }
+
+    /// Ends a line. The `\n` takes the color of the piece before it, since it isn't
+    /// drawn: a piece of its own would just be one more span.
+    fn push_newline(&mut self) {
+        self.text.push('\n');
+        match self.colors.last_mut() {
+            Some((range, _)) => range.end = self.text.len(),
+            None => self.colors.push((0..self.text.len(), None)),
+        }
+    }
+
+    /// Adds `piece`, part of a line, in `color`. A neighbour of the same color merges
+    /// with it, so there are fewer spans to draw.
+    fn push(&mut self, piece: &str, color: Option<Color>, after_punctuation: &mut bool) {
+        let start = self.text.len();
+        push_display_text(&mut self.text, piece, after_punctuation);
+        let end = self.text.len();
+        match self.colors.last_mut() {
+            Some((range, last)) if *last == color => range.end = end,
+            _ if start < end => self.colors.push((start..end, color)),
+            _ => {}
         }
     }
 }
@@ -118,8 +177,11 @@ impl Kind {
 }
 
 impl DiffView {
-    pub(super) fn new(diff: &Diff) -> DiffView {
+    /// `colors` has the syntax colors of `diff`'s lines (see `highlight::diff_colors`),
+    /// or is `None` to draw the code in the default text color.
+    pub(super) fn new(diff: &Diff, colors: Option<&[LineColors]>) -> DiffView {
         let (added, removed) = diff.counts();
+        let mut color_chunks = colors.map(|colors| colors.chunks(CHUNK_LINES));
 
         let mut runs: Vec<Run> = Vec::new();
         for kind in diff.lines.iter().map(Kind::of) {
@@ -132,7 +194,11 @@ impl DiffView {
         DiffView {
             added,
             removed,
-            chunks: diff.lines.chunks(CHUNK_LINES).map(Chunk::new).collect(),
+            chunks: diff
+                .lines
+                .chunks(CHUNK_LINES)
+                .map(|lines| Chunk::new(lines, color_chunks.as_mut().and_then(Iterator::next)))
+                .collect(),
             runs,
             width: content_width(diff),
         }
@@ -276,9 +342,7 @@ fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
         );
         let code = stack(
             std::iter::once(column(diff.runs.iter().map(|run| code_tint(run, tint_width))).into())
-                .chain(window.layers(&diff.chunks, |chunk| {
-                    mono(chunk.code.as_str()).width(code_width).into()
-                })),
+                .chain(window.layers(&diff.chunks, |chunk| code_text(&chunk.code, code_width))),
         );
 
         // The gutter goes over a gap left for it, as a `Sticky` stack layer, so it stays
@@ -434,6 +498,26 @@ fn mono<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
         .shaping(Shaping::Advanced)
 }
 
+/// A chunk's code: `mono`'s text, but one span per colored piece. A `rich_text` always
+/// shapes with `Shaping::Advanced`, and the text engine only shapes a span apart from
+/// its neighbours when the font changes, not the color, so ligatures still form
+/// across pieces (checked in cosmic-text's `ShapeWord::new` and `Attrs::compatible`).
+fn code_text(code: &ColoredText, width: f32) -> Element<'_, Message> {
+    let spans: Vec<Span<'_>> = code
+        .colors
+        .iter()
+        .map(|(range, color)| span(&code.text[range.clone()]).color_maybe(*color))
+        .collect();
+
+    rich_text(spans)
+        .font(fonts::MONO)
+        .size(text_sizes::SMALL)
+        .line_height(Pixels(layouts::DIFF_LINE_HEIGHT))
+        .wrapping(Wrapping::None)
+        .width(width)
+        .into()
+}
+
 /// Tabs as 4 spaces (VS Code's default), so they render predictably and the width math
 /// above (one glyph = one column) holds.
 fn expand_tabs(line: &str) -> Cow<'_, str> {
@@ -458,19 +542,33 @@ fn expand_tabs(line: &str) -> Cow<'_, str> {
 /// shaped as one. It's zero-width, so the width math is unchanged; checked by rendering
 /// a line of operators with and without joiners and comparing their ends.
 fn display_text(line: &str) -> String {
-    let line = expand_tabs(line);
     let mut shown = String::with_capacity(line.len() + line.len() / 4);
-    let mut previous_is_punctuation = false;
-
-    for character in line.chars().filter(|&character| character != '\r') {
-        let is_punctuation = character.is_ascii_punctuation();
-        if previous_is_punctuation && is_punctuation {
-            shown.push('\u{2060}');
-        }
-        shown.push(character);
-        previous_is_punctuation = is_punctuation;
-    }
+    push_display_text(&mut shown, line, &mut false);
     shown
+}
+
+/// Appends `piece`, a whole line or part of one, to `shown` as `display_text` draws it.
+/// `after_punctuation` says whether the line so far ends in ASCII punctuation (a
+/// joiner may be due between that and `piece`), and is updated, so a line pushed in
+/// pieces comes out the same as pushed whole.
+fn push_display_text(shown: &mut String, piece: &str, after_punctuation: &mut bool) {
+    for character in piece.chars() {
+        match character {
+            '\r' => {}
+            '\t' => {
+                shown.push_str("    ");
+                *after_punctuation = false;
+            }
+            _ => {
+                let is_punctuation = character.is_ascii_punctuation();
+                if *after_punctuation && is_punctuation {
+                    shown.push('\u{2060}');
+                }
+                shown.push(character);
+                *after_punctuation = is_punctuation;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -524,14 +622,16 @@ mod tests {
                 },
             ],
         };
-        let view = DiffView::new(&diff);
+        let view = DiffView::new(&diff, None);
 
         assert_eq!((view.added, view.removed), (1, 2));
         assert_eq!(view.chunks.len(), 1);
         let chunk = &view.chunks[0];
         assert_eq!(chunk.old_numbers, "1\n2\n3\n\n4");
         assert_eq!(chunk.new_numbers, "1\n\n\n2\n3");
-        assert_eq!(chunk.code, "same\nold\nolder\nnew\n");
+        assert_eq!(chunk.code.text, "same\nold\nolder\nnew\n");
+        // Uncolored: one default-color span for all of it.
+        assert_eq!(chunk.code.colors, vec![(0..chunk.code.text.len(), None)]);
         assert_eq!(chunk.plus_signs, "\n\n\n+\n");
         assert_eq!(chunk.minus_signs, "\n−\n−\n\n");
         let runs: Vec<_> = view.runs.iter().map(|run| run.lines).collect();
@@ -549,11 +649,58 @@ mod tests {
                 })
                 .collect(),
         };
-        let view = DiffView::new(&diff);
+        let view = DiffView::new(&diff, None);
 
         assert_eq!(view.chunks.len(), 3);
         assert!(view.chunks[1].old_numbers.starts_with("65\n"));
-        assert_eq!(view.chunks[2].code, "129");
+        assert_eq!(view.chunks[2].code.text, "129");
+    }
+
+    #[test]
+    fn test_colored_lines_keep_their_joiners_and_colors() {
+        let (red, blue) = (Color::from_rgb8(255, 0, 0), Color::from_rgb8(0, 0, 255));
+        let mut code = ColoredText::default();
+        // "\tx -> y" with "x -" red and "> y" blue: the joiner between `-` and `>`
+        // goes in although they're in different pieces.
+        code.push_line("\tx -> y", &[(0..4, red), (4..7, blue)]);
+        code.push_newline();
+        code.push_line("plain", &[]);
+
+        assert_eq!(code.text, "    x -\u{2060}> y\nplain");
+        // The same as the line pushed whole.
+        assert_eq!(code.text, display_text("\tx -> y") + "\nplain");
+        let blue_start = "    x -".len();
+        let plain_start = code.text.len() - "plain".len();
+        assert_eq!(
+            code.colors,
+            vec![
+                (0..blue_start, Some(red)),
+                // The newline joins the piece before it.
+                (blue_start..plain_start, Some(blue)),
+                (plain_start..code.text.len(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chunks_get_their_own_lines_colors() {
+        let red = Color::from_rgb8(255, 0, 0);
+        let diff = Diff {
+            lines: (1..=CHUNK_LINES + 1)
+                .map(|n| DiffLine::Added {
+                    new: n,
+                    text: "ab".to_string(),
+                })
+                .collect(),
+        };
+        // Only the last line (alone in the second chunk) is colored.
+        let mut colors = vec![LineColors::new(); diff.lines.len()];
+        colors[CHUNK_LINES] = vec![(0..2, red)];
+        let view = DiffView::new(&diff, Some(&colors));
+
+        assert_eq!(view.chunks[0].code.colors.len(), 1);
+        assert_eq!(view.chunks[0].code.colors[0].1, None);
+        assert_eq!(view.chunks[1].code.colors, vec![(0..2, Some(red))]);
     }
 
     #[test]

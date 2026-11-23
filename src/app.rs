@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::highlight;
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
@@ -899,11 +900,10 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            self.diff = Some(
-                selected
-                    .diff(file, *source)
-                    .map(|diff| DiffView::new(&diff)),
-            );
+            self.diff = Some(selected.diff(file, *source).map(|diff| {
+                let colors = highlight::diff_colors(file, &diff);
+                DiffView::new(&diff, colors.as_deref())
+            }));
         }
     }
 
