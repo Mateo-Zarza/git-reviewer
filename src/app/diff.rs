@@ -2,11 +2,15 @@
 
 use std::borrow::Cow;
 
+use iced::advanced::graphics::text::Paragraph;
+use iced::advanced::text::{self as core_text, Paragraph as _};
 use iced::widget::scrollable::Direction;
-use iced::widget::text::{IntoFragment, Shaping, Wrapping};
+use iced::widget::text::{IntoFragment, LineHeight, Shaping, Wrapping};
 use iced::widget::{Text, column, container, responsive, row, rule, scrollable, space, text};
 use iced::{
-    Alignment::Center, Color, Element, Fill, Padding, Pixels, alignment::Horizontal::Right,
+    Alignment::Center,
+    Color, Element, Fill, Padding, Pixels, Size,
+    alignment::{Horizontal::Right, Vertical},
 };
 use iced_palace::widget::ellipsized_text;
 
@@ -61,10 +65,56 @@ impl App {
         column![
             diff_header(path, *source, diff),
             rule::horizontal(1).style(theme::divider),
-            diff_body(diff),
+            diff_body(diff, self.diff_width),
         ]
         .into()
     }
+}
+
+/// How wide the diff's rows must be to fit its longest line, gutter and padding
+/// included. `load_diff` works it out once per diff rather than `view` on every redraw,
+/// since lines that aren't plain ASCII are measured, which means shaping their text.
+pub(super) fn content_width(diff: &Diff) -> f32 {
+    diff.lines
+        .iter()
+        .map(|line| {
+            let code = code_width(line.text());
+            match line {
+                DiffLine::Hunk(_) => code + HUNK_PADDING_X * 2.0,
+                _ => GUTTER_WIDTH + code + CODE_PADDING_RIGHT,
+            }
+        })
+        .fold(0.0, f32::max)
+}
+
+/// How wide a line's text is drawn. Plain ASCII, nearly every line, is all Fira Code,
+/// where every glyph has the same advance, so it's just counted. Anything else may be
+/// drawn from a fallback font (CJK characters and emoji are wider than Fira Code's
+/// glyphs), so it's measured.
+fn code_width(line: &str) -> f32 {
+    let expanded = expand_tabs(line);
+    if expanded.is_ascii() {
+        expanded.len() as f32 * layouts::DIFF_CHAR_WIDTH
+    } else {
+        measure(&display_text(line))
+    }
+}
+
+/// Measures drawn diff text with iced's own text engine, set up exactly like `mono`,
+/// so fallback fonts and ligatures count the same as on screen.
+fn measure(shown: &str) -> f32 {
+    Paragraph::with_text(core_text::Text {
+        content: shown,
+        bounds: Size::INFINITE,
+        size: Pixels(text_sizes::SMALL),
+        line_height: LineHeight::Absolute(Pixels(layouts::DIFF_LINE_HEIGHT)),
+        font: fonts::MONO,
+        align_x: core_text::Alignment::Left,
+        align_y: Vertical::Top,
+        shaping: Shaping::Advanced,
+        wrapping: Wrapping::None,
+    })
+    .min_width()
 }
 
 fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a, Message> {
@@ -101,22 +151,10 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a
 }
 
 /// The diff lines, scrollable both ways. Lines don't wrap, so every row is given the same
-/// width: the longest line's, or the panel's if that's wider, so the tints run edge to
-/// edge. (Rows can't just be `Fill`: inside a both-ways scrollable that lays out empty.)
-fn diff_body(diff: &Diff) -> Element<'_, Message> {
-    let content_width = diff
-        .lines
-        .iter()
-        .map(|line| {
-            let chars = expand_tabs(line.text()).chars().count() as f32;
-            let code = chars * layouts::DIFF_CHAR_WIDTH;
-            match line {
-                DiffLine::Hunk(_) => code + HUNK_PADDING_X * 2.0,
-                _ => GUTTER_WIDTH + code + CODE_PADDING_RIGHT,
-            }
-        })
-        .fold(0.0, f32::max);
-
+/// width: the longest line's (`content_width`), or the panel's if that's wider, so the
+/// tints run edge to edge. (Rows can't just be `Fill`: inside a both-ways scrollable
+/// that lays out empty.)
+fn diff_body(diff: &Diff, content_width: f32) -> Element<'_, Message> {
     responsive(move |size| {
         let width = content_width.max(size.width);
 
@@ -273,5 +311,23 @@ mod tests {
     #[test]
     fn test_tabs_are_expanded_first() {
         assert_eq!(display_text("\tx => y"), "    x =\u{2060}> y");
+    }
+
+    /// Loads Fira Code into iced's font system, as the app does at startup.
+    fn load_fira_code() {
+        iced::advanced::graphics::text::font_system()
+            .write()
+            .expect("font system")
+            .load_font(Cow::Borrowed(include_bytes!(
+                "../../assets/fonts/FiraCode-Regular.ttf"
+            )));
+    }
+
+    #[test]
+    fn test_counted_ascii_width_matches_the_measured_one() {
+        load_fira_code();
+        let line = "\tlet x = a -> b != c; // <= => 0x1F";
+        let measured = measure(&display_text(line));
+        assert!((code_width(line) - measured).abs() < 0.01, "{measured}");
     }
 }

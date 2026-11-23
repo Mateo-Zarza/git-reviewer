@@ -147,6 +147,8 @@ pub struct App {
     /// so whatever the user put in it isn't destroyed.
     config_is_writable: bool,
     diff: Option<Result<Diff, GitError>>,
+    /// How wide `diff`'s rows are drawn (see `diff::content_width`), worked out when it loads.
+    diff_width: f32,
     error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
@@ -209,6 +211,7 @@ impl App {
             config,
             config_is_writable,
             diff: None,
+            diff_width: 0.0,
             error,
             commit_message: text_editor::Content::new(),
             base_counts: None,
@@ -776,7 +779,9 @@ impl App {
         if let (Some(selected), Some((file, source))) =
             (self.selected_worktree(), &self.selected_file)
         {
-            self.diff = Some(selected.diff(file, *source));
+            let diff = selected.diff(file, *source);
+            self.diff_width = diff.as_ref().map_or(0.0, diff::content_width);
+            self.diff = Some(diff);
         }
     }
 

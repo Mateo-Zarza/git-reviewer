@@ -90,7 +90,8 @@ pub mod layouts {
     pub const DIFF_SIGN_WIDTH: f32 = 16.0;
     /// Advance width of one Fira Code glyph at the diff's text size: 1200 of its 1950
     /// font units per em (≈0.615em, measured from the font file; not the 0.6 of most
-    /// monospace fonts). Every glyph has it, so a line's width is `chars × this`.
+    /// monospace fonts). Every glyph has it, so an ASCII line's width is `chars × this`
+    /// (other lines are measured: see `app::diff::code_width`).
     pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
     pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
     /// The uppercase labels' letter-spacing: the mockup's 0.06em, at their size.
