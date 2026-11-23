@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::f32::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
@@ -26,9 +26,6 @@ use crate::git::{Diff, DiffLine, DiffSource};
 use crate::highlight::{self, LineColors};
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
-
-/// Lets `update` reset the diff's scroll position when another file is opened.
-pub(super) const DIFF_SCROLLABLE: &str = "diff";
 
 // Diff geometry, from the mockup: two 44px line-number columns padded 8 and 10 on the
 // right, a 16px sign column, 24px after the code.
@@ -195,8 +192,7 @@ impl Kind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Highlighting {
     NotStarted,
-    /// Since when.
-    Running(Instant),
+    Running,
     /// Colored, or left in the default text color: not a language we highlight, or the
     /// highlighter failed.
     Done,
@@ -249,14 +245,14 @@ impl DiffView {
         newest.is_of(path, source) && *newest.diff == *diff
     }
 
-    /// How long the code has been loading (see `Highlighting`), or `None` once it's
-    /// shown.
-    pub(super) fn loading_for(&self) -> Option<Duration> {
-        match self.highlighting {
-            Highlighting::NotStarted => Some(Duration::ZERO),
-            Highlighting::Running(since) => Some(since.elapsed()),
-            Highlighting::Done => None,
-        }
+    /// Whether the code is still loading (see `Highlighting`), so not shown yet.
+    pub(super) fn is_loading(&self) -> bool {
+        self.highlighting != Highlighting::Done
+    }
+
+    /// (added, removed) line counts, for the header's +N −N.
+    pub(super) fn counts(&self) -> (usize, usize) {
+        (self.added, self.removed)
     }
 
     /// Keeps this on screen until `next`, a newer version of the same diff, is
@@ -279,7 +275,7 @@ impl DiffView {
         if self.highlighting != Highlighting::NotStarted {
             return None;
         }
-        self.highlighting = Highlighting::Running(Instant::now());
+        self.highlighting = Highlighting::Running;
 
         let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
         let work = move || highlight::diff_colors(&path, &diff);
@@ -302,9 +298,10 @@ impl DiffView {
             self.highlighting = Highlighting::Done;
         } else if let Some(mut next) = self.next.take() {
             next.set_colors(diff, colors);
-            match next.loading_for() {
-                Some(_) => self.next = Some(next),
-                None => *self = *next,
+            if next.is_loading() {
+                self.next = Some(next);
+            } else {
+                *self = *next;
             }
         }
     }
@@ -321,9 +318,10 @@ fn chunks(diff: &Diff, colors: Option<&[LineColors]>) -> Vec<Chunk> {
 }
 
 impl App {
-    /// A header bar (path, which side, +N −N) over the scrollable diff.
+    /// A header bar (path, which side, +N −N) over the scrollable diff. While the diff
+    /// loads (it's read, then highlighted), the header is there and the body waits.
     pub(super) fn diff_panel(&self) -> Element<'_, Message> {
-        let (Some((path, source)), Some(diff)) = (&self.selected_file, &self.diff) else {
+        let Some((path, source)) = &self.selected_file else {
             let clean = matches!(&self.status, Some(Ok(status)) if status.files.is_empty());
             return match (&self.status, clean) {
                 (None, _) => space().into(),
@@ -341,22 +339,22 @@ impl App {
             };
         };
 
-        let diff = match diff {
-            Ok(diff) => diff,
-            Err(err) => {
+        let (counts, body) = match (&self.diff, self.diff_loading_for()) {
+            (Some(Err(err)), _) => {
                 return empty_state(err.to_string(), colors::DANGER)
                     .center(Fill)
                     .into();
             }
+            (Some(Ok(diff)), None) => (Some(diff.counts()), diff_body(diff, self.diff_scroll_y)),
+            // Highlighting: the counts are known. Still being read: they're not.
+            (Some(Ok(diff)), Some(elapsed)) => (Some(diff.counts()), loading(elapsed)),
+            (None, elapsed) => (None, loading(elapsed.unwrap_or_default())),
         };
 
         column![
-            diff_header(path, *source, diff),
+            diff_header(path, *source, counts),
             rule::horizontal(1).style(theme::divider),
-            match diff.loading_for() {
-                Some(elapsed) => loading(elapsed),
-                None => diff_body(diff, self.diff_scroll_y),
-            },
+            body,
         ]
         .into()
     }
@@ -408,9 +406,9 @@ fn measure(shown: &str) -> f32 {
 /// that's quick to highlight (most are, in well under this) doesn't flash one.
 const SPINNER_DELAY: Duration = Duration::from_millis(150);
 
-/// The diff's body while its code is loading (see `Highlighting`), `elapsed` in: empty
-/// at first (see `SPINNER_DELAY`), then a spinner turning once a second. `App::
-/// subscription` redraws it every frame meanwhile.
+/// The diff's body while its code is loading (read, then highlighted: see
+/// `App::diff_loading_for`), `elapsed` in: empty at first (see `SPINNER_DELAY`), then a
+/// spinner turning once a second. `App::subscription` redraws it every frame meanwhile.
 fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
     if elapsed < SPINNER_DELAY {
         return space().width(Fill).height(Fill).into();
@@ -425,36 +423,49 @@ fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
     .into()
 }
 
-fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Element<'a, Message> {
+/// `counts` is (added, removed), or `None` while the diff is still being read.
+fn diff_header<'a>(
+    path: &'a str,
+    source: DiffSource,
+    counts: Option<(usize, usize)>,
+) -> Element<'a, Message> {
     let side = match source {
         DiffSource::Staged => "Staged",
         DiffSource::Unstaged => "Unstaged",
         DiffSource::Untracked => "Untracked",
     };
 
-    container(
-        row![
-            ellipsized_text(path)
-                .size(text_sizes::SMALL)
-                .wrapping(Wrapping::None),
-            container(text(side).size(text_sizes::LABEL))
-                .padding([1.0, 6.0])
-                .style(theme::filled_tag),
-            space().width(Fill),
-            text(format!("+{}", diff.added))
-                .size(text_sizes::SMALL)
-                .color(colors::ADDED),
-            text(format!("−{}", diff.removed))
-                .size(text_sizes::SMALL)
-                .color(colors::DANGER),
-        ]
-        .spacing(10)
-        .align_y(Center),
-    )
-    .height(layouts::DIFF_HEADER_HEIGHT)
-    .padding([0.0, layouts::PANEL_PADDING_X])
-    .align_y(Center)
-    .into()
+    // Pushed piece by piece: a `None` child in `row!` would still take a gap.
+    let mut content = row![
+        ellipsized_text(path)
+            .size(text_sizes::SMALL)
+            .wrapping(Wrapping::None),
+        container(text(side).size(text_sizes::LABEL))
+            .padding([1.0, 6.0])
+            .style(theme::filled_tag),
+        space().width(Fill),
+    ]
+    .spacing(10)
+    .align_y(Center);
+    if let Some((added, removed)) = counts {
+        content = content
+            .push(
+                text(format!("+{added}"))
+                    .size(text_sizes::SMALL)
+                    .color(colors::ADDED),
+            )
+            .push(
+                text(format!("−{removed}"))
+                    .size(text_sizes::SMALL)
+                    .color(colors::DANGER),
+            );
+    }
+
+    container(content)
+        .height(layouts::DIFF_HEADER_HEIGHT)
+        .padding([0.0, layouts::PANEL_PADDING_X])
+        .align_y(Center)
+        .into()
 }
 
 /// The whole file, scrollable both ways: the gutter (line numbers and signs) and the
@@ -489,7 +500,6 @@ fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
         let content = stack![row![space().width(GUTTER_WIDTH), code], sticky(gutter)];
 
         scrollable(container(content).padding(Padding::ZERO.bottom(8.0)))
-            .id(DIFF_SCROLLABLE)
             .direction(Direction::Both {
                 vertical: theme::thin_scrollbar(),
                 horizontal: theme::thin_scrollbar(),
@@ -836,19 +846,19 @@ mod tests {
         let mut colors = vec![LineColors::new(); diff.lines.len()];
         colors[CHUNK_LINES] = vec![(0..2, red)];
         let mut view = DiffView::new("x.rs", DiffSource::Unstaged, diff);
-        assert!(view.loading_for().is_some());
+        assert!(view.is_loading());
 
         // Colors worked out for another diff (one shown before) are dropped.
         view.set_colors(&Arc::new(Diff { lines: Vec::new() }), Some(&colors));
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, None)]);
-        assert!(view.loading_for().is_some());
+        assert!(view.is_loading());
 
         let shown = Arc::clone(&view.diff);
         view.set_colors(&shown, Some(&colors));
         assert_eq!(view.chunks[0].code.colors.len(), 1);
         assert_eq!(view.chunks[0].code.colors[0].1, None);
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, Some(red))]);
-        assert!(view.loading_for().is_none());
+        assert!(!view.is_loading());
     }
 
     /// A one-line Rust diff.
@@ -872,14 +882,14 @@ mod tests {
         assert!(!view.shows("main.rs", DiffSource::Staged, &rust_diff("")));
         assert!(view.start_highlighting().is_some());
         assert!(view.start_highlighting().is_none());
-        assert!(view.loading_for().is_some());
+        assert!(view.is_loading());
     }
 
     #[test]
     fn test_files_we_dont_highlight_are_never_loading() {
         let mut view = DiffView::new("notes.txt", DiffSource::Unstaged, rust_diff("plain"));
 
-        assert!(view.loading_for().is_none());
+        assert!(!view.is_loading());
         assert!(view.start_highlighting().is_none());
     }
 
@@ -892,7 +902,7 @@ mod tests {
 
         view.replace_when_highlighted(DiffView::new("main.rs", source, rust_diff("fn new() {}")));
         // The old version stays on screen, while reloads compare with the new one.
-        assert!(view.loading_for().is_none());
+        assert!(!view.is_loading());
         assert!(Arc::ptr_eq(&view.diff, &old));
         assert!(view.shows("main.rs", source, &rust_diff("fn new() {}")));
         // Highlighting starts for the new version.
@@ -906,7 +916,7 @@ mod tests {
         view.set_colors(&new, None);
         assert!(Arc::ptr_eq(&view.diff, &new));
         assert!(view.next.is_none());
-        assert!(view.loading_for().is_none());
+        assert!(!view.is_loading());
     }
 
     #[test]
