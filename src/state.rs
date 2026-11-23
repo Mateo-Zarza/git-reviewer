@@ -6,12 +6,17 @@
 //! [panels]          # the dragged panel widths, in logical pixels
 //! sidebar = 312.0
 //! changes = 280.0
+//!
+//! [sidebar]
+//! archived = ['C:\repos\old-project']   # archived repos, by their folder's full path
+//! archived_open = false                 # whether the Archived section is open
 //! ```
 //!
-//! The app owns this file and rewrites it whenever a divider is dropped. Nobody needs to
-//! edit it, so a missing or broken one just means the defaults (the next save replaces
-//! it), and unknown keys are ignored rather than rejected.
+//! The app owns this file and rewrites it whenever a divider is dropped or a repo is
+//! archived. Nobody needs to edit it, so a missing or broken one just means the defaults
+//! (the next save replaces it), and unknown keys are ignored rather than rejected.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -26,6 +31,18 @@ const FILE_NAME: &str = "state.toml";
 #[serde(default)]
 pub struct State {
     pub panels: PanelWidths,
+    pub sidebar: SidebarState,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidebarState {
+    /// Archived repos, by their folder's full path rather than their name, so another
+    /// root with a repo of the same name isn't affected. Paths that aren't under the
+    /// current root are kept, for when that root is chosen again.
+    pub archived: BTreeSet<PathBuf>,
+    /// Whether the Archived section is open; closed until opened.
+    pub archived_open: bool,
 }
 
 impl State {
@@ -80,9 +97,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sidebar() {
+        let state =
+            State::parse("[sidebar]\narchived = ['C:\\repos\\old']\narchived_open = true\n")
+                .unwrap();
+        assert!(
+            state
+                .sidebar
+                .archived
+                .contains(&PathBuf::from(r"C:\repos\old"))
+        );
+        assert!(state.sidebar.archived_open);
+        // A file from before archiving existed: nothing archived, section closed.
+        assert_eq!(
+            State::parse("[panels]\nsidebar = 312.0\n").unwrap().sidebar,
+            SidebarState::default()
+        );
+    }
+
+    #[test]
     fn test_round_trip() {
         let mut state = State::default();
         state.panels.sidebar = 333.25;
+        state
+            .sidebar
+            .archived
+            .insert(PathBuf::from(r"C:\repos\old"));
+        state.sidebar.archived_open = true;
 
         let text = toml::to_string_pretty(&state).unwrap();
         assert_eq!(State::parse(&text).unwrap(), state);
