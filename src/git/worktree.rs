@@ -88,12 +88,16 @@ impl Worktree {
         // `branch.ab`, which would read as "upstream gone" on every branch.
         // --no-optional-locks: don't take index.lock just to refresh stat info,
         // so background refreshes never collide with the user's own git commands.
+        // --untracked-files=all: list every untracked file (like VS Code). By default
+        // git folds a wholly untracked folder into one `dir/` entry, which has no file
+        // name to show and no content to diff.
         let output = self.git.run(&[
             "--no-optional-locks",
             "status",
             "--porcelain=2",
             "--branch",
             "--ahead-behind",
+            "--untracked-files=all",
             "-z",
         ])?;
         Ok(Status::parse(&output))
@@ -130,9 +134,8 @@ impl Worktree {
     /// `(path, is_untracked)`, like VS Code's "Discard Changes":
     /// - tracked files go back to their staged (or, if nothing is staged, committed)
     ///   version; staged changes are kept;
-    /// - untracked files are deleted by `git clean`, which also takes a wholly
-    ///   untracked folder (`dir/`) but, unlike a plain delete, spares ignored files
-    ///   inside it (`node_modules`, `.env`) and nested repos or worktrees.
+    /// - untracked files are deleted by `git clean`, which, unlike a plain delete,
+    ///   never touches nested repos or worktrees.
     ///
     /// Only the listed paths are touched, never "everything": a file that appeared after
     /// the user confirmed isn't part of what they agreed to lose.
