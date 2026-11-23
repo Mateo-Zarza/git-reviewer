@@ -1,5 +1,5 @@
 use iced::{
-    Border, Color, Theme,
+    Border, Color, Shadow, Theme, Vector,
     theme::Palette,
     widget::{Row, button, container, rule, scrollable, text, text_editor},
 };
@@ -94,6 +94,9 @@ pub mod layouts {
     /// (other lines are measured: see `app::diff::code_width`).
     pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
     pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
+    // Error toast: a long message (e.g. a hook's output) scrolls inside it past this height.
+    pub const TOAST_WIDTH: f32 = 420.0;
+    pub const TOAST_MAX_HEIGHT: f32 = 240.0;
     /// The uppercase labels' letter-spacing: the mockup's 0.06em, at their size.
     pub const LABEL_TRACKING: f32 = 0.06 * super::text_sizes::LABEL;
     // Padding
@@ -202,6 +205,8 @@ pub mod icons {
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
+    pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
+    pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
     pub fn chevron<'a>(open: bool) -> Svg<'a> {
@@ -463,6 +468,25 @@ pub fn filled_tag(_theme: &Theme) -> container::Style {
         border: Border {
             radius: radii::TAG.into(),
             ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The error toast's card: a step lighter than the panels under it, with a red border
+/// and a shadow to lift it off them.
+pub fn toast(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(colors::HOVER.into()),
+        border: Border {
+            color: colors::DANGER_BORDER,
+            width: 1.0,
+            radius: radii::CONTROL.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
         },
         ..container::Style::default()
     }

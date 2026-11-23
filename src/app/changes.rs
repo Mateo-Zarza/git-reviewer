@@ -459,7 +459,7 @@ fn hover_actions<'a>(
 
 /// A small square button holding a row-size icon (24px around 15px). `on_selected_row`
 /// picks a hover color that still shows on the selected row's blue.
-fn icon_button<'a>(
+pub(super) fn icon_button<'a>(
     bytes: &'static [u8],
     message: Message,
     on_selected_row: bool,
