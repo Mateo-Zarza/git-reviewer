@@ -3,9 +3,11 @@
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
+use std::thread;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
+use iced::futures::channel::oneshot;
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
 use iced::widget::{
@@ -216,7 +218,7 @@ impl DiffView {
     }
 
     /// The task that works out the code's syntax colors, off the UI thread, since that
-    /// can take a while (about 0.3 s for both sides of a 5000-line file). `None` once
+    /// can take a while (up to 0.7 s for both sides of a 5000-line file). `None` once
     /// it's been started. The result comes back as `Message::DiffHighlighted`.
     pub(super) fn start_highlighting(&mut self) -> Option<Task<Message>> {
         if self.highlighting_started {
@@ -224,14 +226,22 @@ impl DiffView {
         }
         self.highlighting_started = true;
 
+        // On a thread of its own. iced polls a new task once on the UI thread, before
+        // handing it to its thread pool (iced_winit's `update`), so the work in an
+        // `async` block that never waits would run right there and freeze the app.
+        // Waiting on the channel makes that first poll return at once instead.
+        let (sender, receiver) = oneshot::channel();
         let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
-        Some(Task::perform(
-            async move {
-                let colors = highlight::diff_colors(&path, &diff);
-                (diff, colors)
-            },
-            |(diff, colors)| Message::DiffHighlighted(diff, colors),
-        ))
+        thread::spawn(move || {
+            // An error only means the app no longer waits for it.
+            let _ = sender.send(highlight::diff_colors(&path, &diff));
+        });
+
+        let diff = Arc::clone(&self.diff);
+        // If the thread panicked (its message is printed), the code stays uncolored.
+        Some(Task::perform(receiver, move |colors| {
+            Message::DiffHighlighted(diff, colors.ok().flatten())
+        }))
     }
 
     /// Colors the code with what `start_highlighting` worked out for `diff`, unless
