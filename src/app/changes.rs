@@ -164,10 +164,7 @@ impl App {
 
         container(
             column![
-                text("COMMIT MESSAGE")
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_MUTED)
-                    .font(fonts::UI_SEMIBOLD),
+                theme::label("COMMIT MESSAGE"),
                 text_editor(&self.commit_message)
                     .placeholder(if cfg!(target_os = "macos") {
                         "Message (⌘+Enter to commit)"
@@ -404,16 +401,10 @@ fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a
     };
 
     let title = button(
-        row![
-            chevron(open),
-            text(title)
-                .size(text_sizes::LABEL)
-                .font(fonts::UI_SEMIBOLD)
-                .color(colors::TEXT_MUTED),
-        ]
-        .spacing(6)
-        .height(Fill)
-        .align_y(Center),
+        row![chevron(open), theme::label(&title),]
+            .spacing(6)
+            .height(Fill)
+            .align_y(Center),
     )
     .on_press(Message::ToggleSection(section))
     .width(Fill)

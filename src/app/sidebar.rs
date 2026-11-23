@@ -20,12 +20,10 @@ impl App {
         container(
             scrollable(
                 column![
-                    container(
-                        text(format!("REPOSITORIES · {}", workspace.repos().len()))
-                            .size(text_sizes::LABEL)
-                            .font(fonts::UI_SEMIBOLD)
-                            .color(colors::TEXT_MUTED),
-                    )
+                    container(theme::label(&format!(
+                        "REPOSITORIES · {}",
+                        workspace.repos().len()
+                    )))
                     .padding([0.0, 8.0]),
                     column(workspace.repos().iter().map(|repo| {
                         let open = self.is_open(&Section::Repo(repo.name().to_string()));

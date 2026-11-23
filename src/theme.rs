@@ -1,7 +1,7 @@
 use iced::{
     Border, Color, Theme,
     theme::Palette,
-    widget::{button, container, rule, scrollable, text_editor},
+    widget::{Row, button, container, rule, scrollable, text, text_editor},
 };
 
 pub mod colors {
@@ -93,6 +93,8 @@ pub mod layouts {
     /// monospace fonts). Every glyph has it, so a line's width is `chars × this`.
     pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
     pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
+    /// The uppercase labels' letter-spacing: the mockup's 0.06em, at their size.
+    pub const LABEL_TRACKING: f32 = 0.06 * super::text_sizes::LABEL;
     // Padding
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
@@ -212,6 +214,22 @@ pub mod icons {
             .height(size)
             .style(move |_, _| svg::Style { color: Some(color) })
     }
+}
+
+/// An uppercase section label ("COMMIT MESSAGE", "CHANGES · 3"), letter-spaced like the
+/// mockup. iced 0.14 can't space letters (its text engine can, but iced never passes
+/// the setting on), so each character is its own text, in a row spaced `LABEL_TRACKING`
+/// apart. That drops kerning, which spaced capitals don't need: measured, the
+/// characters' widths add up exactly to the whole label's, spaces included.
+pub fn label<'a, Message: 'a>(content: &str) -> Row<'a, Message> {
+    Row::with_children(content.chars().map(|character| {
+        text(character.to_string())
+            .size(text_sizes::LABEL)
+            .font(fonts::UI_SEMIBOLD)
+            .color(colors::TEXT_MUTED)
+            .into()
+    }))
+    .spacing(layouts::LABEL_TRACKING)
 }
 
 pub fn divider(theme: &Theme) -> rule::Style {
