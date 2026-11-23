@@ -1,7 +1,7 @@
 use iced::{
-    Border, Color, Theme,
+    Border, Color, Shadow, Theme, Vector,
     theme::Palette,
-    widget::{button, container, rule, scrollable, text_editor},
+    widget::{Row, button, container, rule, scrollable, text, text_editor},
 };
 
 pub mod colors {
@@ -90,9 +90,15 @@ pub mod layouts {
     pub const DIFF_SIGN_WIDTH: f32 = 16.0;
     /// Advance width of one Fira Code glyph at the diff's text size: 1200 of its 1950
     /// font units per em (≈0.615em, measured from the font file; not the 0.6 of most
-    /// monospace fonts). Every glyph has it, so a line's width is `chars × this`.
+    /// monospace fonts). Every glyph has it, so an ASCII line's width is `chars × this`
+    /// (other lines are measured: see `app::diff::code_width`).
     pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
     pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
+    // Error toast: a long message (e.g. a hook's output) scrolls inside it past this height.
+    pub const TOAST_WIDTH: f32 = 420.0;
+    pub const TOAST_MAX_HEIGHT: f32 = 240.0;
+    /// The uppercase labels' letter-spacing: the mockup's 0.06em, at their size.
+    pub const LABEL_TRACKING: f32 = 0.06 * super::text_sizes::LABEL;
     // Padding
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
@@ -199,6 +205,8 @@ pub mod icons {
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
+    pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
+    pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
     pub fn chevron<'a>(open: bool) -> Svg<'a> {
@@ -212,6 +220,22 @@ pub mod icons {
             .height(size)
             .style(move |_, _| svg::Style { color: Some(color) })
     }
+}
+
+/// An uppercase section label ("COMMIT MESSAGE", "CHANGES · 3"), letter-spaced like the
+/// mockup. iced 0.14 can't space letters (its text engine can, but iced never passes
+/// the setting on), so each character is its own text, in a row spaced `LABEL_TRACKING`
+/// apart. That drops kerning, which spaced capitals don't need: measured, the
+/// characters' widths add up exactly to the whole label's, spaces included.
+pub fn label<'a, Message: 'a>(content: &str) -> Row<'a, Message> {
+    Row::with_children(content.chars().map(|character| {
+        text(character.to_string())
+            .size(text_sizes::LABEL)
+            .font(fonts::UI_SEMIBOLD)
+            .color(colors::TEXT_MUTED)
+            .into()
+    }))
+    .spacing(layouts::LABEL_TRACKING)
 }
 
 pub fn divider(theme: &Theme) -> rule::Style {
@@ -444,6 +468,25 @@ pub fn filled_tag(_theme: &Theme) -> container::Style {
         border: Border {
             radius: radii::TAG.into(),
             ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The error toast's card: a step lighter than the panels under it, with a red border
+/// and a shadow to lift it off them.
+pub fn toast(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(colors::HOVER.into()),
+        border: Border {
+            color: colors::DANGER_BORDER,
+            width: 1.0,
+            radius: radii::CONTROL.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
         },
         ..container::Style::default()
     }
