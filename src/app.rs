@@ -359,7 +359,10 @@ impl App {
                 "Config: root `{}` must be an absolute path",
                 root.display()
             ))),
-            Some(root) => Workspace::scan(root).map_err(AppError::from),
+            Some(root) => {
+                let archived = &self.state.sidebar.archived;
+                Workspace::scan(root, |repo| archived.contains(repo)).map_err(AppError::from)
+            }
             None => Err(AppError::Message(
                 "No folder to show yet. Choose the folder that holds your repos.".to_string(),
             )),
