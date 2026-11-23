@@ -1,7 +1,7 @@
 use iced::{
-    Border, Color, Theme,
+    Border, Color, Shadow, Theme, Vector,
     theme::Palette,
-    widget::{button, container, rule, scrollable, text_editor},
+    widget::{Row, button, container, rule, scrollable, text, text_editor},
 };
 
 pub mod colors {
@@ -37,8 +37,6 @@ pub mod colors {
     pub const REMOVED_TINT: Color = color!(0xf0857a, 0.13);
     pub const ADDED_GUTTER: Color = color!(0x252f2a);
     pub const REMOVED_GUTTER: Color = color!(0x342728);
-    pub const HUNK_BG: Color = color!(0x22252c);
-    pub const HUNK_TEXT: Color = color!(0x8fa6c8);
 }
 
 // Everything is 2px above the mockup's sizes (asked for 2026-11-21: easier to read on
@@ -61,6 +59,10 @@ pub mod icon_sizes {
     pub const ROW: f32 = 15.0;
     /// The repo header's chevron.
     pub const CHEVRON: f32 = 14.0;
+    /// The diff's loading spinner.
+    pub const SPINNER: f32 = 24.0;
+    /// The sidebar's archive/unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
+    pub const SIDEBAR_BUTTON: f32 = 14.0;
 }
 
 pub mod layouts {
@@ -71,12 +73,24 @@ pub mod layouts {
 
     // Bars and panels
     pub const TOP_BAR_HEIGHT: f32 = 48.0;
-    pub const SIDEBAR_WIDTH: f32 = 260.0;
-    pub const CHANGES_WIDTH: f32 = 280.0;
+    // Panel widths: draggable (see app/panels.rs), from these defaults down to these
+    // minimums. 170 is VS Code's sidebar minimum. The changes panel's minimum is
+    // measured from its footer's labels instead (`changes::min_width`).
+    pub const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
+    pub const SIDEBAR_MIN_WIDTH: f32 = 170.0;
+    pub const CHANGES_DEFAULT_WIDTH: f32 = 280.0;
+    pub const DIFF_MIN_WIDTH: f32 = 300.0;
+    /// The 1px line between panels.
+    pub const DIVIDER_WIDTH: f32 = 1.0;
+    /// The grab area centered on a divider: odd, so it overhangs the line evenly.
+    pub const DIVIDER_HANDLE_WIDTH: f32 = 5.0;
     // Buttons
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;
     pub const ICON_BUTTON: f32 = 24.0;
+    /// The sidebar's archive/unarchive buttons: smaller, like VS Code's tree-row actions,
+    /// so they fit the repo rows without making them taller.
+    pub const SIDEBAR_ICON_BUTTON: f32 = 20.0;
     /// File rows and section headers in the changes list.
     pub const LIST_ROW_HEIGHT: f32 = 32.0;
     /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
@@ -90,9 +104,15 @@ pub mod layouts {
     pub const DIFF_SIGN_WIDTH: f32 = 16.0;
     /// Advance width of one Fira Code glyph at the diff's text size: 1200 of its 1950
     /// font units per em (≈0.615em, measured from the font file; not the 0.6 of most
-    /// monospace fonts). Every glyph has it, so a line's width is `chars × this`.
+    /// monospace fonts). Every glyph has it, so an ASCII line's width is `chars × this`
+    /// (other lines are measured: see `app::diff::code_width`).
     pub const DIFF_CHAR_WIDTH: f32 = 1200.0 / 1950.0 * super::text_sizes::SMALL;
     pub const DIFF_HEADER_HEIGHT: f32 = 48.0;
+    // Error toast: a long message (e.g. a hook's output) scrolls inside it past this height.
+    pub const TOAST_WIDTH: f32 = 420.0;
+    pub const TOAST_MAX_HEIGHT: f32 = 240.0;
+    /// The uppercase labels' letter-spacing: the mockup's 0.06em, at their size.
+    pub const LABEL_TRACKING: f32 = 0.06 * super::text_sizes::LABEL;
     // Padding
     pub const PANEL_PADDING_X: f32 = 16.0;
     pub const PANEL_PADDING_Y: f32 = 12.0;
@@ -101,6 +121,9 @@ pub mod layouts {
     pub const GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 10.0;
     pub const REPO_GAP: f32 = 14.0;
+    /// The sidebar's Archived list scrolls past this height (about six rows), so an
+    /// open list never takes over the repos above it.
+    pub const ARCHIVED_LIST_MAX_HEIGHT: f32 = 180.0;
 
     // Sidebar tags ("main", "gone"): the label's line box and the padding around it,
     // chosen so the lowercase letters sit centered between the borders. Segoe UI's line
@@ -199,6 +222,11 @@ pub mod icons {
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
+    pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
+    pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
+    pub const SPINNER: &[u8] = include_bytes!("../assets/icons/spinner.svg");
+    pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
+    pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
     pub fn chevron<'a>(open: bool) -> Svg<'a> {
@@ -212,6 +240,22 @@ pub mod icons {
             .height(size)
             .style(move |_, _| svg::Style { color: Some(color) })
     }
+}
+
+/// An uppercase section label ("COMMIT MESSAGE", "CHANGES · 3"), letter-spaced like the
+/// mockup. iced 0.14 can't space letters (its text engine can, but iced never passes
+/// the setting on), so each character is its own text, in a row spaced `LABEL_TRACKING`
+/// apart. That drops kerning, which spaced capitals don't need: measured, the
+/// characters' widths add up exactly to the whole label's, spaces included.
+pub fn label<'a, Message: 'a>(content: &str) -> Row<'a, Message> {
+    Row::with_children(content.chars().map(|character| {
+        text(character.to_string())
+            .size(text_sizes::LABEL)
+            .font(fonts::UI_SEMIBOLD)
+            .color(colors::TEXT_MUTED)
+            .into()
+    }))
+    .spacing(layouts::LABEL_TRACKING)
 }
 
 pub fn divider(theme: &Theme) -> rule::Style {
@@ -390,6 +434,13 @@ pub fn thin_scrollbar() -> scrollable::Scrollbar {
         .margin(2)
 }
 
+/// `thin_scrollbar` in iced's embedded mode: while the content overflows, the scrollable
+/// pads its right side by the bar's full 10px and draws the bar there, so the bar never
+/// covers the content. With no overflow nothing is reserved.
+pub fn embedded_scrollbar() -> scrollable::Scrollbar {
+    thin_scrollbar().spacing(0)
+}
+
 /// Every scrollbar in the app: no track, a PILL-grey thumb that lightens on hover/drag.
 pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     let rail = |active: bool| scrollable::Rail {
@@ -444,6 +495,25 @@ pub fn filled_tag(_theme: &Theme) -> container::Style {
         border: Border {
             radius: radii::TAG.into(),
             ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The error toast's card: a step lighter than the panels under it, with a red border
+/// and a shadow to lift it off them.
+pub fn toast(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(colors::HOVER.into()),
+        border: Border {
+            color: colors::DANGER_BORDER,
+            width: 1.0,
+            radius: radii::CONTROL.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
         },
         ..container::Style::default()
     }

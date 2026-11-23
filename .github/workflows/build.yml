@@ -77,14 +77,16 @@ jobs:
           mkdir dist
           cp "target/$TARGET/release/git-reviewer.exe" "dist/git-reviewer-$VERSION-$PLATFORM.exe"
 
-      # A .app is just a folder: the binary in Contents/MacOS and an Info.plist that
-      # tells macOS what it is. Built by hand so no extra tool is needed.
+      # A .app is just a folder: the binary in Contents/MacOS, the icon in
+      # Contents/Resources and an Info.plist that tells macOS what it is. Built by hand so
+      # no extra tool is needed.
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           app="dist/Git Reviewer.app"
-          mkdir -p "$app/Contents/MacOS"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/$TARGET/release/git-reviewer" "$app/Contents/MacOS/git-reviewer"
+          cp assets/app-icon/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -101,6 +103,8 @@ jobs:
               <string>git-reviewer</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
               <key>CFBundleShortVersionString</key>
               <string>$VERSION</string>
               <key>CFBundleVersion</key>

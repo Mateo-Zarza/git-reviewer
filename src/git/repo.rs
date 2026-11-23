@@ -9,7 +9,18 @@ pub struct Repo {
     worktrees: Vec<Worktree>,
 }
 impl Repo {
+    /// Opens the repo and lists its worktrees, each with its `git status` loaded.
     pub fn open(path: impl Into<PathBuf>) -> Result<Repo, GitError> {
+        let mut repo = Repo::open_without_status(path)?;
+        repo.load_statuses();
+
+        Ok(repo)
+    }
+
+    /// Opens the repo and lists its worktrees, but runs no `git status`: their cached
+    /// status stays `None`. One git call instead of one per worktree, for repos that
+    /// are only listed (the archived ones).
+    pub fn open_without_status(path: impl Into<PathBuf>) -> Result<Repo, GitError> {
         let git = Git::new(absolute(path.into())?);
 
         let name = git
@@ -18,19 +29,22 @@ impl Repo {
             .map(|os_str| os_str.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".into());
 
-        let mut repo = Repo {
+        let worktrees = Worktree::parse_list(&git.run(&["worktree", "list", "--porcelain"])?);
+
+        Ok(Repo {
             git,
             name,
-            worktrees: Vec::new(),
-        };
-
-        repo.refresh()?;
-
-        Ok(repo)
+            worktrees,
+        })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The repo's folder (its main worktree), absolute.
+    pub fn path(&self) -> &Path {
+        self.git.dir()
     }
 
     pub fn worktrees(&self) -> &[Worktree] {
@@ -41,11 +55,7 @@ impl Repo {
         &mut self.worktrees
     }
 
-    pub fn refresh(&mut self) -> Result<(), GitError> {
-        let cmd_output = self.git.run(&["worktree", "list", "--porcelain"])?;
-
-        self.worktrees = Worktree::parse_list(&cmd_output);
-
+    fn load_statuses(&mut self) {
         // One `git status` per worktree, run in parallel so a repo with many
         // worktrees doesn't multiply the refresh time.
         std::thread::scope(|scope| {
@@ -53,8 +63,6 @@ impl Repo {
                 scope.spawn(move || worktree.refresh_cached_status());
             }
         });
-
-        Ok(())
     }
 
     pub fn fetch(&self) -> Result<(), GitError> {

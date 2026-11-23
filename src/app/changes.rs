@@ -7,16 +7,15 @@ use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
     Button, Row, button, column, container, hover, row, rule, scrollable, space, text, text_editor,
 };
-use iced::{
-    Alignment::Center,
-    Border, Color, Element, Fill, Padding,
-    alignment::{Horizontal, Vertical::Bottom},
-};
+use iced::{Alignment::Center, Border, Color, Element, Fill, Padding, alignment::Horizontal};
 use iced_palace::widget::ellipsized_text;
 
 use std::f32::consts::TAU;
+use std::sync::LazyLock;
 
-use iced::{Radians, Rotation};
+use iced::advanced::text::{self as advanced_text, Paragraph as _, Text};
+use iced::widget::text::{LineHeight, Shaping};
+use iced::{Font, Radians, Rotation, Size, alignment};
 
 use super::file_icon::file_icon;
 use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
@@ -27,6 +26,8 @@ use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 impl App {
     pub(super) fn changes_panel(&self) -> Element<'_, Message> {
         let status = match &self.status {
+            // The selected worktree's status is on its way (see `App::load_status`).
+            None if self.selected_worktree_path.is_some() => return space().into(),
             None => {
                 return empty_state("Select a worktree", colors::TEXT_MUTED)
                     .center(Fill)
@@ -67,23 +68,34 @@ impl App {
             .filter(|(base, _)| Some(base.as_str()) != upstream)
             .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"));
 
-        column![
-            row![
-                ellipsized_text(branch)
-                    .size(text_sizes::BRANCH)
-                    .font(fonts::UI_SEMIBOLD)
-                    .wrapping(Wrapping::None),
-                ellipsized_text(repo_name.unwrap_or_default())
-                    .size(text_sizes::BRANCH)
+        // The repo and upstream go on their own line under the branch: side by side, a
+        // long branch took the whole width (a row hands out width left to right) and
+        // squeezed them away. On this line the repo comes first, so a long upstream is
+        // what gets cut. Pushed only when present: a `None` child would still take a gap.
+        let mut repo_line = row![].spacing(layouts::GAP).padding(Padding::ZERO.top(2.0));
+        if let Some(repo_name) = repo_name {
+            repo_line = repo_line.push(
+                ellipsized_text(repo_name)
+                    .size(text_sizes::SMALL)
                     .color(colors::TEXT_MUTED)
                     .wrapping(Wrapping::None),
-                ellipsized_text(upstream.unwrap_or_default())
+            );
+        }
+        if let Some(upstream) = upstream {
+            repo_line = repo_line.push(
+                ellipsized_text(upstream)
                     .size(text_sizes::SMALL)
                     .color(colors::TEXT_DIM)
                     .wrapping(Wrapping::None),
-            ]
-            .spacing(layouts::GAP)
-            .align_y(Bottom),
+            );
+        }
+
+        column![
+            ellipsized_text(branch)
+                .size(text_sizes::BRANCH)
+                .font(fonts::UI_SEMIBOLD)
+                .wrapping(Wrapping::None),
+            repo_line,
             // A broken base from the config takes the base line's place, in red.
             match &self.base_error {
                 Some(problem) => Some(
@@ -164,10 +176,7 @@ impl App {
 
         container(
             column![
-                text("COMMIT MESSAGE")
-                    .size(text_sizes::LABEL)
-                    .color(colors::TEXT_MUTED)
-                    .font(fonts::UI_SEMIBOLD),
+                theme::label("COMMIT MESSAGE"),
                 text_editor(&self.commit_message)
                     .placeholder(if cfg!(target_os = "macos") {
                         "Message (⌘+Enter to commit)"
@@ -362,12 +371,53 @@ impl App {
         };
 
         row![
-            footer_button("Rm. worktree", Removal::Worktree, worktree_removable),
-            footer_button("Del. branch", Removal::Branch, branch_deletable),
+            footer_button(RM_WORKTREE, Removal::Worktree, worktree_removable),
+            footer_button(DEL_BRANCH, Removal::Branch, branch_deletable),
         ]
         .spacing(layouts::GAP)
         .into()
     }
+}
+
+const RM_WORKTREE: &str = "Rm. worktree";
+const DEL_BRANCH: &str = "Del. branch";
+
+/// The narrowest the panel can be with the footer buttons' labels still on one line:
+/// its padding, the gap, and two buttons as wide as the widest label plus the buttons'
+/// default padding. Measured once, because the labels' width depends on the system
+/// font (Segoe UI, San Francisco).
+pub(super) fn min_width() -> f32 {
+    static MIN_WIDTH: LazyLock<f32> = LazyLock::new(|| {
+        let widest = [RM_WORKTREE, DEL_BRANCH]
+            .map(label_width)
+            .into_iter()
+            .fold(0.0, f32::max);
+        let padding = button::DEFAULT_PADDING;
+        let button = widest + padding.left + padding.right;
+        // Rounded up: a label wraps when it's even a fraction wider than its room.
+        (2.0 * layouts::PANEL_PADDING_X + layouts::GAP + 2.0 * button).ceil()
+    });
+    *MIN_WIDTH
+}
+
+/// How wide `label` is on one line, as a plain `text` draws it: the default font and
+/// size (main.rs sets no default font, so it's `Font::DEFAULT`). iced measures with the
+/// same font system it renders with, so no window is needed.
+fn label_width(label: &str) -> f32 {
+    type Paragraph = <iced::Renderer as advanced_text::Renderer>::Paragraph;
+
+    Paragraph::with_text(Text {
+        content: label,
+        bounds: Size::INFINITE,
+        size: text_sizes::BODY.into(),
+        line_height: LineHeight::default(),
+        font: Font::DEFAULT,
+        align_x: advanced_text::Alignment::Default,
+        align_y: alignment::Vertical::Top,
+        shaping: Shaping::default(),
+        wrapping: Wrapping::None,
+    })
+    .min_width()
 }
 
 /// The commit box's key handling: Ctrl+Enter (Cmd+Enter on macOS, which is what
@@ -404,16 +454,10 @@ fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a
     };
 
     let title = button(
-        row![
-            chevron(open),
-            text(title)
-                .size(text_sizes::LABEL)
-                .font(fonts::UI_SEMIBOLD)
-                .color(colors::TEXT_MUTED),
-        ]
-        .spacing(6)
-        .height(Fill)
-        .align_y(Center),
+        row![chevron(open), theme::label(&title),]
+            .spacing(6)
+            .height(Fill)
+            .align_y(Center),
     )
     .on_press(Message::ToggleSection(section))
     .width(Fill)
@@ -461,21 +505,38 @@ fn hover_actions<'a>(
 
 /// A small square button holding a row-size icon (24px around 15px). `on_selected_row`
 /// picks a hover color that still shows on the selected row's blue.
-fn icon_button<'a>(
+pub(super) fn icon_button<'a>(
     bytes: &'static [u8],
     message: Message,
     on_selected_row: bool,
 ) -> Button<'a, Message> {
+    sized_icon_button(
+        bytes,
+        message,
+        on_selected_row,
+        layouts::ICON_BUTTON,
+        icon_sizes::ROW,
+    )
+}
+
+/// `icon_button` at another size: a `size`-square button holding an `icon_size` icon.
+pub(super) fn sized_icon_button<'a>(
+    bytes: &'static [u8],
+    message: Message,
+    on_selected_row: bool,
+    size: f32,
+    icon_size: f32,
+) -> Button<'a, Message> {
     // Pinned at a whole-pixel offset rather than centered: centering 15px in 24px puts
     // the icon at 4.5px, a half pixel, which smears its thin strokes across two pixel
     // columns (the + looked dim). Half a pixel off-center isn't visible; blur is.
-    let before = ((layouts::ICON_BUTTON - icon_sizes::ROW) / 2.0).floor();
-    let after = layouts::ICON_BUTTON - icon_sizes::ROW - before;
+    let before = ((size - icon_size) / 2.0).floor();
+    let after = size - icon_size - before;
 
-    button(icon(bytes, icon_sizes::ROW, colors::TEXT_MUTED))
+    button(icon(bytes, icon_size, colors::TEXT_MUTED))
         .on_press(message)
-        .width(layouts::ICON_BUTTON)
-        .height(layouts::ICON_BUTTON)
+        .width(size)
+        .height(size)
         .padding(Padding {
             top: before,
             left: before,

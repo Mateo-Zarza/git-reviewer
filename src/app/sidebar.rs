@@ -1,13 +1,17 @@
 //! The left panel: every repo under the root and its worktrees.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
 use iced::widget::scrollable::Direction;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{
+    Container, button, column, container, keyed_column, mouse_area, row, rule, scrollable, text,
+};
 use iced::{Alignment::Center, Color, Element, Fill, Padding};
 use iced_palace::widget::ellipsized_text;
 
+use super::changes::sized_icon_button;
 use super::{App, Message, Section};
 use crate::git::{Repo, Workspace, Worktree};
 use crate::theme::icons::{self, chevron, icon};
@@ -17,52 +21,154 @@ impl App {
     pub(super) fn sidebar<'a>(&'a self, workspace: &'a Workspace) -> Element<'a, Message> {
         let selected = self.selected_worktree_path.as_deref();
 
-        container(
-            scrollable(
+        // The panel's padding goes inside the scrollable, so the bar runs the panel's full
+        // height against the divider, like VS Code's, and its 10px come out of the rows'
+        // width instead of being drawn over their right end (see `embedded_scrollbar`).
+        let repos = scrollable(
+            container(
                 column![
-                    container(
-                        text(format!("REPOSITORIES · {}", workspace.repos().len()))
-                            .size(text_sizes::LABEL)
-                            .font(fonts::UI_SEMIBOLD)
-                            .color(colors::TEXT_MUTED),
-                    )
+                    container(theme::label(&format!(
+                        "REPOSITORIES · {}",
+                        workspace.repos().len()
+                    )))
                     .padding([0.0, 8.0]),
-                    column(workspace.repos().iter().map(|repo| {
+                    // Keyed by repo, so each row keeps its own hover state: in a plain
+                    // column, archiving a repo slides the next one into its widget state,
+                    // already "hovered", and its `on_enter` would never fire.
+                    keyed_column(workspace.repos().iter().map(|repo| {
                         let open = self.is_open(&Section::Repo(repo.name().to_string()));
-                        repo_view(repo, selected, open)
+                        let hovered = self.hovered_repo.as_deref() == Some(repo.path());
+                        (repo_key(repo), repo_view(repo, selected, open, hovered))
                     }))
                     .spacing(layouts::REPO_GAP),
                 ]
                 .spacing(layouts::REPO_GAP),
             )
-            .direction(Direction::Vertical(theme::thin_scrollbar()))
-            .style(theme::scrollbar),
+            .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X]),
         )
-        .width(layouts::SIDEBAR_WIDTH)
-        .height(Fill)
-        .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X])
-        .style(|_| container::background(colors::SIDEBAR))
-        .into()
+        .direction(Direction::Vertical(theme::embedded_scrollbar()))
+        .style(theme::scrollbar)
+        .width(Fill)
+        .height(Fill);
+
+        // A column lays out its `Fill` child last, so the Archived section takes the
+        // height it needs at the bottom and the repo list scrolls in what's left.
+        let mut panel = column![repos];
+        if let Some(archived) = self.archived_section(workspace.archived()) {
+            panel = panel.push(archived);
+        }
+
+        container(panel)
+            .width(Fill)
+            .height(Fill)
+            .style(|_| container::background(colors::SIDEBAR))
+            .into()
+    }
+
+    /// The archived repos, pinned to the bottom of the sidebar under a divider like a
+    /// VS Code view pane: a header that opens and closes the list, and the list, which
+    /// scrolls on its own past `ARCHIVED_LIST_MAX_HEIGHT`. `None` when nothing is
+    /// archived.
+    fn archived_section<'a>(&self, archived: &'a [Repo]) -> Option<Element<'a, Message>> {
+        if archived.is_empty() {
+            return None;
+        }
+        let open = self.state.sidebar.archived_open;
+
+        let header = button(
+            row![
+                chevron(open),
+                theme::label(&format!("ARCHIVED · {}", archived.len())),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        )
+        .on_press(Message::ToggleArchived)
+        .width(Fill)
+        .padding([4.0, 8.0])
+        .style(theme::list_row(false));
+
+        let mut section = column![
+            rule::horizontal(1).style(theme::divider),
+            container(header).padding([6.0, layouts::ROW_PADDING_X]),
+        ];
+        if open {
+            let list = scrollable(
+                container(column(archived.iter().map(archived_view)).spacing(2)).padding(
+                    Padding::from([0.0, layouts::ROW_PADDING_X]).bottom(layouts::PANEL_PADDING_Y),
+                ),
+            )
+            .direction(Direction::Vertical(theme::embedded_scrollbar()))
+            .style(theme::scrollbar)
+            .width(Fill);
+
+            section = section.push(container(list).max_height(layouts::ARCHIVED_LIST_MAX_HEIGHT));
+        }
+        Some(section.into())
     }
 }
 
-/// A repo's header (chevron, name, worktree count), which folds its worktree list away
-/// when clicked, and the list itself while open.
-fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element<'a, Message> {
+/// A repo's key in the keyed list: its folder, hashed, since iced wants a `Copy` key.
+fn repo_key(repo: &Repo) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    repo.path().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// "1 worktree", "2 worktrees", as tall as the archive button that replaces it on hover,
+/// so the row's height doesn't change when one swaps for the other.
+fn worktree_count<'a>(repo: &Repo) -> Container<'a, Message> {
     let count = repo.worktrees().len();
-    let count_label = if count == 1 {
+    let label = if count == 1 {
         "1 worktree".to_string()
     } else {
         format!("{count} worktrees")
     };
+    container(text(label).size(text_sizes::SMALL).color(colors::TEXT_DIM))
+        .height(layouts::SIDEBAR_ICON_BUTTON)
+        .align_y(Center)
+}
 
+/// The sidebar's archive/unarchive button.
+fn archive_button<'a>(bytes: &'static [u8], message: Message) -> Element<'a, Message> {
+    sized_icon_button(
+        bytes,
+        message,
+        false,
+        layouts::SIDEBAR_ICON_BUTTON,
+        icon_sizes::SIDEBAR_BUTTON,
+    )
+    .into()
+}
+
+/// A repo's header (chevron, name, and the worktree count or, while hovered, the archive
+/// button), which folds its worktree list away when clicked, and the list itself while
+/// open.
+fn repo_view<'a>(
+    repo: &'a Repo,
+    selected: Option<&Path>,
+    open: bool,
+    hovered: bool,
+) -> Element<'a, Message> {
+    let path = repo.path().to_path_buf();
+    // A click on the archive button doesn't also fold the repo: iced's button skips a
+    // click its content already handled.
+    let end = if hovered {
+        archive_button(icons::ARCHIVE, Message::ArchiveRepo(path.clone()))
+    } else {
+        worktree_count(repo).into()
+    };
+
+    // The name fills the row and is cut to fit, so the count chip always keeps its place
+    // at the end (a row lays out `Fill` children last, with whatever width is left).
     let header = button(
         row![
             chevron(open),
-            text(repo.name()).font(fonts::UI_SEMIBOLD),
-            text(count_label)
-                .size(text_sizes::SMALL)
-                .color(colors::TEXT_DIM),
+            ellipsized_text(repo.name())
+                .font(fonts::UI_SEMIBOLD)
+                .wrapping(Wrapping::None)
+                .width(Fill),
+            end,
         ]
         .spacing(6)
         .align_y(Center),
@@ -73,6 +179,17 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element
     .width(Fill)
     .padding([2.0, 8.0])
     .style(theme::list_row(false));
+
+    // Only the header counts as hovering the repo, not its worktree rows.
+    let header = mouse_area(header)
+        .on_enter(Message::RepoHovered {
+            repo: path.clone(),
+            hovered: true,
+        })
+        .on_exit(Message::RepoHovered {
+            repo: path,
+            hovered: false,
+        });
 
     let mut view = column![header].spacing(2);
     if open {
@@ -86,6 +203,31 @@ fn repo_view<'a>(repo: &'a Repo, selected: Option<&Path>, open: bool) -> Element
         );
     }
     view.into()
+}
+
+/// An archived repo: its name, dimmed, then the unarchive button and the worktree count,
+/// placed like a repo header's. It has no chevron (its worktrees aren't listed), so the
+/// row is indented by the chevron and its gap to keep the names in line with the
+/// headers above.
+fn archived_view(repo: &Repo) -> Element<'_, Message> {
+    container(
+        row![
+            ellipsized_text(repo.name())
+                .color(colors::TEXT_MUTED)
+                .wrapping(Wrapping::None)
+                .width(Fill),
+            archive_button(
+                icons::UNARCHIVE,
+                Message::UnarchiveRepo(repo.path().to_path_buf()),
+            ),
+            worktree_count(repo),
+        ]
+        .spacing(6)
+        .align_y(Center),
+    )
+    .width(Fill)
+    .padding(Padding::from([2.0, 8.0]).left(8.0 + icon_sizes::CHEVRON + 6.0))
+    .into()
 }
 
 fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element<'a, Message> {

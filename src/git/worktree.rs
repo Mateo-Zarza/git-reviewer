@@ -88,24 +88,34 @@ impl Worktree {
         // `branch.ab`, which would read as "upstream gone" on every branch.
         // --no-optional-locks: don't take index.lock just to refresh stat info,
         // so background refreshes never collide with the user's own git commands.
+        // --untracked-files=all: list every untracked file (like VS Code). By default
+        // git folds a wholly untracked folder into one `dir/` entry, which has no file
+        // name to show and no content to diff.
         let output = self.git.run(&[
             "--no-optional-locks",
             "status",
             "--porcelain=2",
             "--branch",
             "--ahead-behind",
+            "--untracked-files=all",
             "-z",
         ])?;
         Ok(Status::parse(&output))
     }
 
+    /// The file's diff as the whole file with the changes inline. git is asked for so
+    /// much context that one hunk spans the file (a file over a million lines would come
+    /// back as a few hunks, which still parse; only the gaps between them go missing).
     pub fn diff(&self, path: &str, source: DiffSource) -> Result<Diff, GitError> {
+        const WHOLE_FILE: &str = "--unified=1000000";
         Ok(match source {
-            DiffSource::Staged => Diff::parse(&self.git.run(&["diff", "--cached", "--", path])?),
-            DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", "--", path])?),
-            DiffSource::Untracked => {
-                Diff::from_new_file(&std::fs::read_to_string(self.path().join(path))?)
-            }
+            DiffSource::Staged => Diff::parse(
+                &self
+                    .git
+                    .run(&["diff", "--cached", WHOLE_FILE, "--", path])?,
+            ),
+            DiffSource::Unstaged => Diff::parse(&self.git.run(&["diff", WHOLE_FILE, "--", path])?),
+            DiffSource::Untracked => Diff::from_new_file(&std::fs::read(self.path().join(path))?),
         })
     }
 
@@ -122,9 +132,8 @@ impl Worktree {
     /// `(path, is_untracked)`, like VS Code's "Discard Changes":
     /// - tracked files go back to their staged (or, if nothing is staged, committed)
     ///   version; staged changes are kept;
-    /// - untracked files are deleted by `git clean`, which also takes a wholly
-    ///   untracked folder (`dir/`) but, unlike a plain delete, spares ignored files
-    ///   inside it (`node_modules`, `.env`) and nested repos or worktrees.
+    /// - untracked files are deleted by `git clean`, which, unlike a plain delete,
+    ///   never touches nested repos or worktrees.
     ///
     /// Only the listed paths are touched, never "everything": a file that appeared after
     /// the user confirmed isn't part of what they agreed to lose.
