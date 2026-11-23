@@ -59,6 +59,8 @@ pub mod icon_sizes {
     pub const ROW: f32 = 15.0;
     /// The repo header's chevron.
     pub const CHEVRON: f32 = 14.0;
+    /// The diff's loading spinner.
+    pub const SPINNER: f32 = 24.0;
     /// The sidebar's archive/unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
     pub const SIDEBAR_BUTTON: f32 = 14.0;
 }
@@ -222,6 +224,7 @@ pub mod icons {
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
     pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
     pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
+    pub const SPINNER: &[u8] = include_bytes!("../assets/icons/spinner.svg");
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
     pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 

@@ -26,6 +26,8 @@ use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 impl App {
     pub(super) fn changes_panel(&self) -> Element<'_, Message> {
         let status = match &self.status {
+            // The selected worktree's status is on its way (see `App::load_status`).
+            None if self.selected_worktree_path.is_some() => return space().into(),
             None => {
                 return empty_state("Select a worktree", colors::TEXT_MUTED)
                     .center(Fill)

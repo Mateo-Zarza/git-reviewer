@@ -5,6 +5,7 @@ use std::{
 
 use crate::git::{GitError, Repo, Worktree};
 
+#[derive(Clone)]
 pub struct Workspace {
     repos: Vec<Repo>,
     /// Repos set aside by the user: their worktrees are listed but their statuses aren't

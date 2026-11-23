@@ -56,7 +56,12 @@ impl Git {
             // Every path we pass is an exact file name from `git status`, never a
             // pattern. Without this, `restore -- [id].tsx` would also match `i.tsx` and
             // `d.tsx` (glob), and a name starting with `:` would be read as magic.
-            .env("GIT_LITERAL_PATHSPECS", "1");
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            // The app reads (status, diff) while it changes things (stage, commit) on
+            // other threads. Left to itself, `git status` takes the index's lock to save
+            // what it refreshed, and a `git add` running then fails on `index.lock`.
+            // Without these optional locks, reads never lock anything.
+            .env("GIT_OPTIONAL_LOCKS", "0");
 
         // git is a console program. Started from a GUI app (see `windows_subsystem` in
         // main.rs), Windows would open a console window for every call, flashing on

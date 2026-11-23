@@ -10,27 +10,31 @@ mod sidebar;
 mod sticky;
 mod watch;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::env::args;
 use std::fmt;
-use std::path::{PathBuf, absolute};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf, absolute};
+use std::sync::{Arc, LazyLock, mpsc};
+use std::thread;
 
-use iced::widget::operation;
-use iced::widget::scrollable::{Direction, RelativeOffset};
+use iced::futures::channel::oneshot;
+use iced::widget::scrollable::Direction;
 use iced::widget::{
     Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
     text_editor,
 };
 use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, ConfigError};
-use crate::git::{ChangeKind, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::highlight::LineColors;
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
-use diff::{DIFF_SCROLLABLE, DiffView};
+use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 
@@ -43,6 +47,23 @@ pub enum Message {
     },
     /// The diff was scrolled; how far down it is now, in pixels.
     DiffScrolled(f32),
+    /// The syntax colors of a diff's lines are worked out (see
+    /// `DiffView::start_highlighting`); `None` if it's not a language we highlight.
+    DiffHighlighted(Arc<Diff>, Option<Vec<LineColors>>),
+    /// A rescan is done (see `App::rescan`); `None` if its thread panicked.
+    Rescanned(Option<Scanned>),
+    /// The selected worktree's status is read (see `App::load_status`): the request's
+    /// number, and what was read (`None` if its thread panicked).
+    StatusLoaded(u64, Option<LoadedStatus>),
+    /// A file's diff is read (see `App::load_diff`): the request's number, which file
+    /// and side, and the diff (`None` if its thread panicked).
+    DiffLoaded(u64, (String, DiffSource), Option<Result<Diff, GitError>>),
+    /// A git action that changes the selected worktree (stage, discard...) is done.
+    ActionDone(Result<(), GitError>),
+    /// A commit is done: the message it was made with, and how it went.
+    Committed(String, Result<(), GitError>),
+    /// A worktree removal is done: which worktree, and how it went.
+    Removed(PathBuf, Result<(), GitError>),
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -152,6 +173,48 @@ pub struct DiscardPlan {
     files: Vec<(String, bool)>,
 }
 
+/// A workspace scanned on its own thread (see `App::rescan`), and the
+/// `App::workspace_version` it was started at. The workspace is in an `Arc` only
+/// because a `Message` must be `Clone`; it never actually gets cloned, so
+/// `Arc::unwrap_or_clone` takes it out for free.
+#[derive(Clone)]
+pub struct Scanned {
+    version: u64,
+    workspace: Arc<Result<Workspace, AppError>>,
+}
+
+/// By hand, since the git types have no `Debug` (a `Message` needs one).
+impl fmt::Debug for Scanned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Scanned(version {})", self.version)
+    }
+}
+
+/// A worktree's status and how far it is from its base, read on a thread of its own
+/// (see `App::load_status`).
+#[derive(Debug, Clone)]
+pub struct LoadedStatus {
+    status: Result<Status, GitError>,
+    /// `None` with no base to compare with.
+    base: Option<BaseCounts>,
+    /// Whether that base came from the config: one that doesn't resolve is then a typo
+    /// worth reporting.
+    base_is_configured: bool,
+}
+
+/// The base a worktree is compared with (the config's, else origin/HEAD), and its
+/// ahead/behind counts against it.
+type BaseCounts = (String, Result<(usize, usize), GitError>);
+
+/// Where the background rescan is at (see `App::rescan`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Rescan {
+    Idle,
+    Running,
+    /// Running, and another one is due once it's done.
+    Queued,
+}
+
 /// A push/pull running in the background, which the primary button shows as busy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RemoteOp {
@@ -161,6 +224,11 @@ enum RemoteOp {
 
 pub struct App {
     workspace: Result<Workspace, AppError>,
+    rescan: Rescan,
+    /// Goes up with every scan done right away (`scan_now`), so a background one
+    /// started before it is dropped: it read the repos before whatever that was for
+    /// (a worktree removed, another root).
+    workspace_version: u64,
     /// The Sync or Publish in flight and when it started (the spinner's angle comes
     /// from the elapsed time). `None` when idle.
     remote_op: Option<(RemoteOp, Instant)>,
@@ -169,7 +237,16 @@ pub struct App {
     dialog_open: bool,
     selected_worktree_path: Option<PathBuf>,
     selected_file: Option<(String, DiffSource)>,
+    /// `None` while there's no worktree selected, and while its status is being read.
     status: Option<Result<Status, GitError>>,
+    /// The number of the newest status and diff reads asked for (see `load_status` and
+    /// `load_diff`): an older one may come back later, and is then dropped.
+    status_request: u64,
+    diff_request: u64,
+    /// When the newest diff read was asked for: the loading spinner's clock.
+    diff_requested_at: Instant,
+    /// A commit is running (see `Message::Commit`).
+    committing: bool,
     /// `None` until a root is given on the command line or saved in the config.
     root: Option<PathBuf>,
     config: Config,
@@ -245,11 +322,17 @@ impl App {
 
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
+            rescan: Rescan::Idle,
+            workspace_version: 0,
             remote_op: None,
             dialog_open: false,
             selected_worktree_path: None,
             selected_file: None,
             status: None,
+            status_request: 0,
+            diff_request: 0,
+            diff_requested_at: Instant::now(),
+            committing: false,
             root: cli_root.or_else(|| config.root.clone()),
             config,
             config_is_writable,
@@ -265,7 +348,7 @@ impl App {
             dragging: None,
             window_width: f32::INFINITY,
         };
-        app.workspace = app.scan();
+        app.scan_now();
         app
     }
 
@@ -318,39 +401,35 @@ impl App {
     }
 
     /// Carries out a removal on the worktree it was planned for (found by path, not
-    /// whichever is selected now), then rescans. `force` lets git throw away the
-    /// worktree's uncommitted changes; the branch is still deleted with `-d`, which
-    /// refuses to lose commits.
-    fn remove(&mut self, plan: &RemovalPlan, force: bool) {
+    /// whichever is selected now), in order on the git thread (see `in_order`): deleting
+    /// a big worktree's files takes a while. `force` lets git throw away the worktree's
+    /// uncommitted changes; the branch is still deleted with `-d`, which refuses to lose
+    /// commits. `Message::Removed` follows.
+    fn remove(&self, plan: RemovalPlan, force: bool) -> Task<Message> {
         let repo = match &self.workspace {
-            Ok(workspace) => workspace.find_repo(&plan.worktree),
+            Ok(workspace) => workspace.find_repo(&plan.worktree).cloned(),
             Err(_) => None,
         };
         let Some(repo) = repo else {
-            return;
+            return Task::none();
         };
 
-        let result = repo.remove_worktree(&plan.worktree, force).and_then(|()| {
-            match (plan.removal, &plan.branch) {
-                (Removal::Branch, Some(branch)) => repo.delete_branch(branch),
-                _ => Ok(()),
-            }
-        });
-        self.report(result);
-
-        self.workspace = self.scan();
-        // If the selected worktree was the one removed, there's nothing left to show.
-        if self.selected_worktree().is_none() {
-            self.selected_worktree_path = None;
-        }
-        self.load_status();
-        self.retarget_selected_file();
+        let worktree = plan.worktree.clone();
+        in_order(move || {
+            repo.remove_worktree(&plan.worktree, force).and_then(|()| {
+                match (plan.removal, &plan.branch) {
+                    (Removal::Branch, Some(branch)) => repo.delete_branch(branch),
+                    _ => Ok(()),
+                }
+            })
+        })
+        .map(move |result| Message::Removed(worktree.clone(), or_crashed(result)))
     }
 
     /// Switches to another root folder: remembers it in the config, forgets the old
     /// selection, and rescans. The watcher follows on its own, since the worktree list
     /// it's keyed on changes.
-    fn set_root(&mut self, root: PathBuf) {
+    fn set_root(&mut self, root: PathBuf) -> Task<Message> {
         self.root = Some(root.clone());
         if self.config_is_writable {
             self.config.root = Some(root);
@@ -359,39 +438,85 @@ impl App {
             }
         }
 
-        self.selected_worktree_path = None;
-        self.selected_file = None;
-        self.diff = None;
-        self.workspace = self.scan();
-        self.load_status();
+        self.scan_now();
+        self.select_worktree(None)
     }
 
-    fn scan(&self) -> Result<Workspace, AppError> {
-        match &self.root {
-            // A relative root (hand-written in the config) would depend on where the app
-            // was launched from, which for a macOS app opened from Finder is `/`.
-            Some(root) if root.is_relative() => Err(AppError::Message(format!(
-                "Config: root `{}` must be an absolute path",
-                root.display()
-            ))),
-            Some(root) => {
-                let archived = &self.state.sidebar.archived;
-                Workspace::scan(root, |repo| archived.contains(repo)).map_err(AppError::from)
+    /// Selects a worktree, or none, and forgets what was shown of the previous one. Its
+    /// status is read next: the `Task` that does it.
+    fn select_worktree(&mut self, path: Option<PathBuf>) -> Task<Message> {
+        self.selected_worktree_path = path;
+        self.selected_file = None;
+        self.diff = None;
+        // Not the previous worktree's while this one's loads: its files could be
+        // clicked, in the wrong worktree.
+        self.status = None;
+        self.base_counts = None;
+        self.base_error = None;
+        self.load_status()
+    }
+
+    /// Scans the workspace right away, on the UI thread: for the moments that can't
+    /// show the old one any longer (startup, another root). Everything else uses
+    /// `rescan`.
+    fn scan_now(&mut self) {
+        self.workspace = scan_root(self.root.as_deref(), &self.state.sidebar.archived);
+        self.workspace_version += 1;
+    }
+
+    /// Drops the result of a rescan that's running, and queues a fresh one: for changes
+    /// that scan would undo, as it read the repos (or the archived list) before them.
+    fn invalidate_scans(&mut self) {
+        self.workspace_version += 1;
+        if self.rescan == Rescan::Running {
+            self.rescan = Rescan::Queued;
+        }
+    }
+
+    /// Scans the workspace again, on a thread of its own (see `on_thread`): that's a
+    /// few git calls per worktree (half a second for 25 worktrees, measured), and the
+    /// app must keep responding meanwhile. The result comes back as
+    /// `Message::Rescanned`.
+    ///
+    /// One at a time: a rescan asked for while one runs is queued, once however often
+    /// it's asked for (file changes come in bursts), and starts when that one is done.
+    /// The running one may have read the repos before whatever changed.
+    fn rescan(&mut self) -> Task<Message> {
+        match self.rescan {
+            Rescan::Idle => {
+                self.rescan = Rescan::Running;
+                let (root, version) = (self.root.clone(), self.workspace_version);
+                let archived = self.state.sidebar.archived.clone();
+                on_thread(move || {
+                    let workspace = Arc::new(scan_root(root.as_deref(), &archived));
+                    Scanned { version, workspace }
+                })
+                .map(Message::Rescanned)
             }
-            None => Err(AppError::Message(
-                "No folder to show yet. Choose the folder that holds your repos.".to_string(),
-            )),
+            Rescan::Running | Rescan::Queued => {
+                self.rescan = Rescan::Queued;
+                Task::none()
+            }
         }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+
+        // Many messages can load a diff (opening a file, staging, a refresh...), so a
+        // new one's highlighting is started here, after any of them.
+        match &mut self.diff {
+            Some(Ok(diff)) => match diff.start_highlighting() {
+                Some(highlighting) => Task::batch([task, highlighting]),
+                None => task,
+            },
+            _ => task,
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::WorktreeSelected(path) => {
-                self.selected_worktree_path = Some(path);
-                self.diff = None;
-                self.selected_file = None;
-                self.load_status();
-            }
+            Message::WorktreeSelected(path) => return self.select_worktree(Some(path)),
             Message::Refresh | Message::FilesChanged => {
                 // The Refresh button also re-reads the config's bases, so fixing one
                 // doesn't need a restart. (The root stays: it decides what's watched.)
@@ -401,9 +526,81 @@ impl App {
                         Err(err) => self.error = Some(config_error(err)),
                     }
                 }
-                self.workspace = self.scan();
-                self.load_status();
-                self.retarget_selected_file();
+                return self.rescan();
+            }
+            Message::Rescanned(scan) => {
+                let queued = self.rescan == Rescan::Queued;
+                self.rescan = Rescan::Idle;
+                let mut tasks = Vec::new();
+                match scan {
+                    // Dropped if the workspace was scanned right away meanwhile (see
+                    // `workspace_version`).
+                    Some(Scanned { version, workspace }) if version == self.workspace_version => {
+                        self.workspace = Arc::unwrap_or_clone(workspace);
+                        // The selected worktree may be gone (removed outside the app).
+                        let task = if self.selected_worktree().is_none() {
+                            self.select_worktree(None)
+                        } else {
+                            self.load_status()
+                        };
+                        tasks.push(task);
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.error = Some(AppError::Message(
+                            "Refreshing stopped unexpectedly (an internal error)".to_string(),
+                        ));
+                    }
+                }
+                if queued {
+                    tasks.push(self.rescan());
+                }
+                return Task::batch(tasks);
+            }
+            Message::StatusLoaded(request, loaded) => {
+                // Only the newest read asked for: an older one read the repo before
+                // whatever the newer one was asked for.
+                if request != self.status_request {
+                    return Task::none();
+                }
+                match loaded {
+                    Some(loaded) => self.apply_status(loaded),
+                    None => self.status = Some(Err(thread_crashed())),
+                }
+                return self.retarget_selected_file();
+            }
+            Message::DiffLoaded(request, file, diff) => {
+                // Only the newest read asked for, and only while that file and side are
+                // still the selected ones.
+                if request == self.diff_request && self.selected_file.as_ref() == Some(&file) {
+                    self.show_diff(&file.0, file.1, or_crashed(diff));
+                }
+            }
+            Message::ActionDone(result) => {
+                self.report(result);
+                return self.load_status();
+            }
+            Message::Committed(message, result) => {
+                self.committing = false;
+                // Cleared, unless it was edited while the commit ran.
+                if result.is_ok() && self.commit_message.text() == message {
+                    self.commit_message = text_editor::Content::new();
+                }
+                self.report(result);
+                return self.load_status();
+            }
+            Message::Removed(worktree, result) => {
+                let removed = result.is_ok();
+                self.report(result);
+                // A scan that started before this still lists the removed worktree.
+                self.invalidate_scans();
+                let mut tasks = vec![self.rescan()];
+                if removed && self.selected_worktree_path.as_ref() == Some(&worktree) {
+                    tasks.push(self.select_worktree(None));
+                } else {
+                    tasks.push(self.load_status());
+                }
+                return Task::batch(tasks);
             }
             Message::WatchFailed(reason) => {
                 self.error = Some(AppError::Message(format!(
@@ -422,100 +619,91 @@ impl App {
                     Message::RootChosen(folder.map(|handle| handle.path().to_path_buf()))
                 });
             }
-            Message::RootChosen(Some(root)) => self.set_root(root),
+            Message::RootChosen(Some(root)) => return self.set_root(root),
             Message::RootChosen(None) => {} // picker cancelled
             Message::FileSelected { path, source } => {
-                self.selected_file = Some((path, source));
-                self.load_diff();
-                // iced keeps a scrollable's offset across content changes, so a newly
-                // opened file would start wherever the previous one was scrolled to.
+                // The file already shown: nothing to do (as in VS Code).
+                if matches!(&self.diff, Some(Ok(view)) if view.is_of(&path, source)) {
+                    return Task::none();
+                }
+                let file = (path, source);
+                self.selected_file = Some(file);
+                // Loading, with no scrollable meanwhile: the new one starts at the top.
+                self.diff = None;
                 self.diff_scroll_y = 0.0;
-                return operation::snap_to(DIFF_SCROLLABLE, RelativeOffset::START);
+                return self.load_diff();
             }
             Message::DiffScrolled(y) => self.diff_scroll_y = y,
-            Message::Stage(path) => {
-                if let Some(result) = self.selected_worktree().map(|w| w.stage(&path)) {
-                    self.report(result);
+            Message::DiffHighlighted(diff, colors) => {
+                if let Some(Ok(view)) = &mut self.diff {
+                    view.set_colors(&diff, colors.as_deref());
                 }
-
-                self.load_status();
-                self.retarget_selected_file();
             }
-            Message::Unstage(path) => {
-                if let Some(result) = self.selected_worktree().map(|w| w.unstage(&path)) {
-                    self.report(result);
-                }
-
-                self.load_status();
-                self.retarget_selected_file();
-            }
-            Message::StageAll => {
-                if let Some(result) = self.selected_worktree().map(Worktree::stage_all) {
-                    self.report(result);
-                }
-
-                self.load_status();
-                self.retarget_selected_file();
-            }
-            Message::UnstageAll => {
-                if let Some(result) = self.selected_worktree().map(Worktree::unstage_all) {
-                    self.report(result);
-                }
-
-                self.load_status();
-                self.retarget_selected_file();
-            }
+            Message::Stage(path) => return self.act(move |worktree| worktree.stage(&path)),
+            Message::Unstage(path) => return self.act(move |worktree| worktree.unstage(&path)),
+            Message::StageAll => return self.act(Worktree::stage_all),
+            Message::UnstageAll => return self.act(Worktree::unstage_all),
             Message::CommitMessageEdited(action) => {
                 self.commit_message.perform(action);
             }
-            Message::Commit => {
-                if let Some(worktree) = self.selected_worktree() {
-                    match worktree.commit(&self.commit_message.text()) {
-                        Ok(_) => self.commit_message = text_editor::Content::new(),
-                        Err(err) => self.error = Some(err.into()),
-                    }
-                    self.load_status();
-                    self.retarget_selected_file();
+            // One at a time: a second click (or ⌘/Ctrl+Enter) while one runs does nothing.
+            Message::Commit if !self.committing => {
+                if let Some(worktree) = self.selected_worktree().cloned() {
+                    self.committing = true;
+                    let message = self.commit_message.text();
+                    return in_order(move || {
+                        let result = worktree.commit(&message);
+                        (message, result)
+                    })
+                    .map(|done| {
+                        let (message, result) =
+                            done.unwrap_or_else(|| (String::new(), Err(thread_crashed())));
+                        Message::Committed(message, result)
+                    });
                 }
             }
+            Message::Commit => {} // one is already running
             Message::FetchAll => {
                 if let Ok(workspace) = &self.workspace {
                     let repos = workspace.repos().to_vec();
-                    return Task::perform(async move { Repo::fetch_all(&repos) }, Message::Fetched);
+                    return on_thread(move || Repo::fetch_all(&repos))
+                        .map(|result| Message::Fetched(or_crashed(result)));
                 }
             }
             Message::Fetched(result) => {
                 self.report(result);
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
                 // everything rather than just the selected status.
-                self.workspace = self.scan();
-                self.load_status();
+                return self.rescan();
             }
             // One push/pull at a time: the button is disabled while one runs, and these
             // guards also cover a message that was already queued.
             Message::Sync if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Sync, Instant::now()));
-                    return Task::perform(async move { worktree.sync() }, Message::Synced);
+                    // In order: a pull changes the worktree, like staging does.
+                    return in_order(move || worktree.sync())
+                        .map(|result| Message::Synced(or_crashed(result)));
                 }
             }
             Message::Synced(result) => {
                 self.remote_op = None;
                 self.report(result);
-                self.load_status();
-                self.load_diff();
+                return self.load_status();
             }
             Message::Publish if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Publish, Instant::now()));
-                    return Task::perform(async move { worktree.publish() }, Message::Published);
+                    // Not in order: a push changes nothing in the worktree, so staging
+                    // and committing needn't wait for the network.
+                    return on_thread(move || worktree.publish())
+                        .map(|result| Message::Published(or_crashed(result)));
                 }
             }
             Message::Published(result) => {
                 self.remote_op = None;
                 self.report(result);
-                self.load_status();
-                self.load_diff();
+                return self.load_status();
             }
             Message::DiscardRequested(scope) => {
                 // One dialog at a time: a second click while one is open does nothing.
@@ -544,13 +732,12 @@ impl App {
                 // The worktree the plan was made for, looked up by path: not whichever
                 // one happens to be selected now.
                 let worktree = match &self.workspace {
-                    Ok(workspace) if confirmed => workspace.find_worktree(&plan.worktree),
+                    Ok(workspace) if confirmed => workspace.find_worktree(&plan.worktree).cloned(),
                     _ => None,
                 };
-                if let Some(result) = worktree.map(|w| w.discard(&plan.files)) {
-                    self.report(result);
-                    self.load_status();
-                    self.retarget_selected_file();
+                if let Some(worktree) = worktree {
+                    return in_order(move || worktree.discard(&plan.files))
+                        .map(|result| Message::ActionDone(or_crashed(result)));
                 }
             }
             Message::Sync | Message::Publish => {} // one is already running
@@ -564,8 +751,7 @@ impl App {
                 };
                 // Nothing uncommitted means nothing to lose: no question asked.
                 if plan.changes == 0 {
-                    self.remove(&plan, false);
-                    return Task::none();
+                    return self.remove(plan, false);
                 }
                 // The same OS dialog as discarding (see `DiscardRequested`).
                 let dialog = rfd::AsyncMessageDialog::new()
@@ -585,7 +771,7 @@ impl App {
             Message::RemovalAnswered(plan, confirmed) => {
                 self.dialog_open = false;
                 if confirmed {
-                    self.remove(&plan, true);
+                    return self.remove(plan, true);
                 }
             }
             Message::ToggleSection(section) => {
@@ -597,21 +783,21 @@ impl App {
             Message::ArchiveRepo(repo) => {
                 // An archived repo's worktrees aren't listed or refreshed any more, so
                 // its selected worktree would be left on screen going stale.
-                if self
+                let task = if self
                     .selected_repo()
                     .is_some_and(|selected| selected.path() == repo)
                 {
-                    self.selected_worktree_path = None;
-                    // With no selection these run no git: they just clear the changes
-                    // panel and the diff.
-                    self.load_status();
-                    self.retarget_selected_file();
-                }
+                    self.select_worktree(None)
+                } else {
+                    Task::none()
+                };
                 // Moved rather than rescanned: a rescan runs git in every repo, which
-                // held the window up for most of a second.
+                // takes most of a second. One that's running read the old archived
+                // list, so it would put the repo back: it's redone.
                 if let Ok(workspace) = &mut self.workspace {
                     workspace.archive(&repo);
                 }
+                self.invalidate_scans();
                 // Its row is gone, so its `on_exit` never comes: without this, the repo
                 // would come back from the Archived list showing its archive button.
                 if self.hovered_repo.as_ref() == Some(&repo) {
@@ -619,6 +805,7 @@ impl App {
                 }
                 self.state.sidebar.archived.insert(repo);
                 self.save_state("the archived repos");
+                return task;
             }
             Message::UnarchiveRepo(repo) => {
                 // Only this repo is reopened. The watcher picks its worktrees up, since
@@ -631,6 +818,8 @@ impl App {
                 if result.is_ok() {
                     self.state.sidebar.archived.remove(&repo);
                     self.save_state("the archived repos");
+                    // As when archiving: a running rescan read the old archived list.
+                    self.invalidate_scans();
                 }
                 self.report(result);
             }
@@ -709,11 +898,12 @@ impl App {
         // running watcher instead of restarting it on every refresh.
         paths.sort();
 
-        // A message per frame only while a Sync/Publish runs, to animate its icon;
-        // idle, the app draws nothing.
-        let spinner = match self.remote_op {
-            Some(_) => window::frames().map(|_| Message::Tick),
-            None => Subscription::none(),
+        // A message per frame only while a Sync/Publish runs or the diff is loading, to
+        // animate their spinners; idle, the app draws nothing.
+        let spinner = if self.remote_op.is_some() || self.diff_loading_for().is_some() {
+            window::frames().map(|_| Message::Tick)
+        } else {
+            Subscription::none()
         };
 
         Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
@@ -889,8 +1079,43 @@ impl App {
         .into()
     }
 
-    fn load_status(&mut self) {
-        self.status = self.selected_worktree().map(|worktree| worktree.status());
+    /// Reads the selected worktree's status, and how far it is from its base, on a
+    /// thread of its own (see `on_thread`). It comes back as `Message::StatusLoaded`,
+    /// which then reloads the selected file's diff (see `retarget_selected_file`).
+    fn load_status(&mut self) -> Task<Message> {
+        self.status_request += 1;
+        let Some(worktree) = self.selected_worktree().cloned() else {
+            self.status = None;
+            self.base_counts = None;
+            self.base_error = None;
+            return Task::none();
+        };
+
+        // A base set in the config wins over the repo's origin/HEAD.
+        let configured_base = self
+            .selected_repo()
+            .and_then(|repo| self.config.base_for(repo.name()))
+            .map(String::from);
+        let repo = self.selected_repo().cloned();
+        let request = self.status_request;
+        on_thread(move || {
+            let base_is_configured = configured_base.is_some();
+            let base = configured_base.or_else(|| repo.and_then(|repo| repo.default_base()));
+            LoadedStatus {
+                status: worktree.status(),
+                base: base.map(|base| {
+                    let counts = worktree.ahead_behind(&base);
+                    (base, counts)
+                }),
+                base_is_configured,
+            }
+        })
+        .map(move |loaded| Message::StatusLoaded(request, loaded))
+    }
+
+    /// Shows a status `load_status` read.
+    fn apply_status(&mut self, loaded: LoadedStatus) {
+        self.status = Some(loaded.status);
 
         // Keep the selected row's sidebar badges in sync with what was just loaded,
         // so stage/unstage/commit update the pill without a full rescan.
@@ -903,46 +1128,47 @@ impl App {
             worktree.set_cached_status(status.as_ref().ok().cloned());
         }
 
-        // A base set in the config wins over the repo's origin/HEAD.
-        let configured_base = self
-            .selected_repo()
-            .and_then(|repo| self.config.base_for(repo.name()))
-            .map(String::from);
-        let base = configured_base
-            .clone()
-            .or_else(|| self.selected_repo().and_then(|repo| repo.default_base()));
-
         self.base_error = None;
-        self.base_counts = match (base, self.selected_worktree()) {
-            (Some(base), Some(worktree)) => match worktree.ahead_behind(&base) {
-                Ok(counts) => Some((base, counts)),
-                Err(_) => {
-                    // A configured base that doesn't resolve is a typo in the config;
-                    // say so instead of quietly dropping the "from base" line.
-                    if configured_base.is_some() {
-                        self.base_error = Some(format!("Base `{base}` from the config not found"));
-                    }
-                    None
+        self.base_counts = match loaded.base {
+            Some((base, Ok(counts))) => Some((base, counts)),
+            Some((base, Err(_))) => {
+                // A configured base that doesn't resolve is a typo in the config;
+                // say so instead of quietly dropping the "from base" line.
+                if loaded.base_is_configured {
+                    self.base_error = Some(format!("Base `{base}` from the config not found"));
                 }
-            },
-            _ => None,
+                None
+            }
+            None => None,
         };
+    }
+
+    /// Runs a git action that changes the selected worktree (stage, unstage...) in
+    /// order on the git thread (see `in_order`). `Message::ActionDone` follows.
+    fn act(
+        &self,
+        action: impl FnOnce(&Worktree) -> Result<(), GitError> + Send + 'static,
+    ) -> Task<Message> {
+        let Some(worktree) = self.selected_worktree().cloned() else {
+            return Task::none();
+        };
+        in_order(move || action(&worktree)).map(|result| Message::ActionDone(or_crashed(result)))
     }
 
     /// After anything that changes the index (stage, unstage, commit, refresh), keeps the
     /// selected file on the side it was showing if that side still exists, otherwise
     /// moves it to its other side, or clears the selection once the file has no changes.
     /// Deriving this from the new status (instead of from the action) means a failed git
-    /// command leaves the selection alone.
-    fn retarget_selected_file(&mut self) {
+    /// command leaves the selection alone. The `Task` reloads the diff.
+    fn retarget_selected_file(&mut self) -> Task<Message> {
         // No readable status (worktree gone, git failing): nothing to show a diff of.
         let Some(Ok(status)) = &self.status else {
             self.selected_file = None;
             self.diff = None;
-            return;
+            return Task::none();
         };
         let Some((path, source)) = &self.selected_file else {
-            return;
+            return Task::none();
         };
 
         let entry = status.files.iter().find(|file| file.path == *path);
@@ -961,25 +1187,83 @@ impl App {
         match new_source {
             Some(new_source) => {
                 self.selected_file = Some((path.clone(), new_source));
-                self.load_diff();
+                self.load_diff()
             }
             None => {
                 self.selected_file = None;
                 self.diff = None;
+                Task::none()
             }
         }
     }
 
-    fn load_diff(&mut self) {
-        if let (Some(selected), Some((file, source))) =
-            (self.selected_worktree(), &self.selected_file)
-        {
-            self.diff = Some(
-                selected
-                    .diff(file, *source)
-                    .map(|diff| DiffView::new(&diff)),
-            );
+    /// Reads the selected file's diff again, on a thread of its own (see `on_thread`).
+    /// It comes back as `Message::DiffLoaded` (see `show_diff`); its colors come after
+    /// that, from `update`.
+    fn load_diff(&mut self) -> Task<Message> {
+        self.diff_request += 1;
+        let (Some(worktree), Some(file)) = (
+            self.selected_worktree().cloned(),
+            self.selected_file.clone(),
+        ) else {
+            return Task::none();
+        };
+
+        // The spinner's clock starts for a file (or side) that isn't on screen yet. A
+        // reload of the one shown, even one still loading, keeps it running.
+        if !matches!(&self.diff, Some(Ok(view)) if view.is_of(&file.0, file.1)) {
+            self.diff_requested_at = Instant::now();
         }
+
+        let request = self.diff_request;
+        let (path, source) = file.clone();
+        on_thread(move || worktree.diff(&path, source))
+            .map(move |diff| Message::DiffLoaded(request, file.clone(), diff))
+    }
+
+    /// Shows a diff `load_diff` read, of `source`'s side of the file at `path`.
+    fn show_diff(&mut self, path: &str, source: DiffSource, diff: Result<Diff, GitError>) {
+        match diff {
+            // Nothing changed (most refreshes): keep what's on screen, colors and all.
+            Ok(diff) if matches!(&self.diff, Some(Ok(view)) if view.shows(path, source, &diff)) => {
+            }
+            Ok(diff) => {
+                let new = DiffView::new(path, source, diff);
+                match &mut self.diff {
+                    // The file on screen changed: it stays until the new version is
+                    // ready (see `DiffView::replace_when_highlighted`).
+                    Some(Ok(view))
+                        if view.is_of(path, source) && !view.is_loading() && new.is_loading() =>
+                    {
+                        view.replace_when_highlighted(new);
+                    }
+                    _ => {
+                        // The scrollable (and where it's scrolled to) only carries over
+                        // if both diffs are shown. Otherwise one isn't there for a while
+                        // (an error, or a loading diff, sits in its place), and the new
+                        // one starts at the top.
+                        let shown = matches!(&self.diff, Some(Ok(view)) if !view.is_loading());
+                        let keeps_scrollable = shown && !new.is_loading();
+                        if !keeps_scrollable {
+                            self.diff_scroll_y = 0.0;
+                        }
+                        self.diff = Some(Ok(new));
+                    }
+                }
+            }
+            Err(err) => self.diff = Some(Err(err)),
+        }
+    }
+
+    /// How long the selected file's code has been loading (read, then highlighted),
+    /// counted from when it was asked for; `None` while it's shown, or there's none.
+    fn diff_loading_for(&self) -> Option<Duration> {
+        let loading = match (&self.selected_file, &self.diff) {
+            (Some(_), None) => true,
+            (_, Some(Ok(diff))) => diff.is_loading(),
+            _ => false,
+        };
+        loading.then(|| self.diff_requested_at.elapsed())
     }
 
     fn is_open(&self, section: &Section) -> bool {
@@ -1064,7 +1348,84 @@ fn config_error(err: ConfigError) -> AppError {
     AppError::Message(format!("Config: {err}"))
 }
 
+/// The workspace under `root`, or why there isn't one. The `archived` repos (by folder)
+/// are opened without their statuses.
+fn scan_root(root: Option<&Path>, archived: &BTreeSet<PathBuf>) -> Result<Workspace, AppError> {
+    match root {
+        // A relative root (hand-written in the config) would depend on where the app
+        // was launched from, which for a macOS app opened from Finder is `/`.
+        Some(root) if root.is_relative() => Err(AppError::Message(format!(
+            "Config: root `{}` must be an absolute path",
+            root.display()
+        ))),
+        Some(root) => Workspace::scan(root, |repo| archived.contains(repo)).map_err(AppError::from),
+        None => Err(AppError::Message(
+            "No folder to show yet. Choose the folder that holds your repos.".to_string(),
+        )),
+    }
+}
+
 /// A centered, muted message for panels with nothing to show (shared by the panels).
 fn empty_state<'a>(message: impl Into<String>, color: Color) -> Container<'a, Message> {
     container(text(message.into()).color(color).center()).padding([24.0, 8.0])
+}
+
+/// A task that runs `work` on a thread of its own and produces its result, or `None` if
+/// the thread panicked (its panic message is printed).
+///
+/// Blocking work (git, highlighting) can't just go in a `Task::perform` `async` block:
+/// iced polls a new task once on the UI thread, before its thread pool sees it
+/// (iced_winit's `update`), so work that never waits would run right there and freeze
+/// the app. Waiting on the channel makes that first poll return at once. (iced's own
+/// `task::blocking` does the same, but iced 0.14 doesn't make it public.)
+fn on_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Task<Option<T>> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        // An error only means nothing waits for the result any more.
+        let _ = sender.send(work());
+    });
+    Task::perform(receiver, Result::ok)
+}
+
+/// A task that runs `work` on the app's git thread, after everything given to it
+/// before, and produces its result, or `None` if `work` panicked (its panic message is
+/// printed; the thread carries on with the next job).
+///
+/// For git actions that change a repo (stage, commit, discard, pull...). Two of those at
+/// once would clash on git's `index.lock`, the second failing; one at a time, they also
+/// happen in the order they were clicked. (Reads go through `on_thread` instead: they
+/// take no lock, see `GIT_OPTIONAL_LOCKS` in `git::Git::run`.)
+fn in_order<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Task<Option<T>> {
+    type Job = Box<dyn FnOnce() + Send>;
+    static GIT_THREAD: LazyLock<mpsc::Sender<Job>> = LazyLock::new(|| {
+        let (sender, jobs) = mpsc::channel::<Job>();
+        thread::spawn(move || {
+            for job in jobs {
+                // A panicking job drops its result's sender, which says so (`None`).
+                let _ = panic::catch_unwind(AssertUnwindSafe(job));
+            }
+        });
+        sender
+    });
+
+    let (sender, receiver) = oneshot::channel();
+    let job: Job = Box::new(move || {
+        // An error only means nothing waits for the result any more.
+        let _ = sender.send(work());
+    });
+    // Fails only if the git thread is gone, which `catch_unwind` prevents; the job's
+    // dropped sender would then say `None`, like a panic.
+    let _ = GIT_THREAD.send(job);
+    Task::perform(receiver, Result::ok)
+}
+
+/// The result of git work done on another thread (see `on_thread` and `in_order`):
+/// `None`, from a thread that panicked, becomes an error saying so.
+fn or_crashed<T>(result: Option<Result<T, GitError>>) -> Result<T, GitError> {
+    result.unwrap_or_else(|| Err(thread_crashed()))
+}
+
+/// What git work on another thread reports if that thread panicked.
+fn thread_crashed() -> GitError {
+    GitError::CommandFailed("it stopped unexpectedly (an internal error)".to_string())
 }

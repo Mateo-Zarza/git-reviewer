@@ -10,6 +10,7 @@ use crate::theme::text_sizes;
 mod app;
 mod config;
 mod git;
+mod highlight;
 mod state;
 mod theme;
 

@@ -1,7 +1,7 @@
 /// One line of a whole-file diff. Each line keeps its number on the side(s) it exists
 /// on, so the old file (context + removed lines, in order) and the new file (context +
 /// added lines) can both be read back out of a `Diff`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DiffLine {
     Context {
         old: usize,
@@ -54,7 +54,7 @@ pub enum DiffSource {
 
 /// A file's diff as the whole file, changes inline (like VS Code), not hunks: git is
 /// asked for enough context that one hunk covers everything (see `Worktree::diff`).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diff {
     pub lines: Vec<DiffLine>,
     /// git treats the file as binary, so there are no lines to show (VS Code says so
