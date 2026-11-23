@@ -6,7 +6,9 @@ use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Wrapping};
-use iced::widget::{Text, column, container, responsive, row, rule, scrollable, space, text};
+use iced::widget::{
+    Text, column, container, responsive, row, rule, scrollable, space, stack, text,
+};
 use iced::{
     Alignment::Center,
     Color, Element, Fill, Padding, Pixels, Size,
@@ -22,7 +24,7 @@ use crate::theme::{self, colors, fonts, layouts, text_sizes};
 pub(super) const DIFF_SCROLLABLE: &str = "diff";
 
 // Diff geometry, from the mockup: two 44px line-number columns padded 8 and 10 on the
-// right, a 16px sign column, 24px after the code; hunk headers are padded 16 each side.
+// right, a 16px sign column, 24px after the code.
 const OLD_NUMBER_PADDING: f32 = 8.0;
 const NEW_NUMBER_PADDING: f32 = 10.0;
 const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
@@ -30,7 +32,92 @@ const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
     + NEW_NUMBER_PADDING
     + layouts::DIFF_SIGN_WIDTH;
 const CODE_PADDING_RIGHT: f32 = 24.0;
-const HUNK_PADDING_X: f32 = 16.0;
+
+/// The selected file's diff, laid out the way `diff_body` draws it. `load_diff` builds
+/// it once per diff, so `view`, which runs after every message, does no per-line work.
+///
+/// Each column (old numbers, new numbers, code) is a single text with one line per diff
+/// line, not a row of widgets per line: a whole file would be tens of thousands of
+/// widgets, rebuilt after every message, and iced has no virtual list. Every line is
+/// `DIFF_LINE_HEIGHT` tall, so the columns line up, and the tints behind them are one
+/// block per run of same-kind lines.
+pub(super) struct DiffView {
+    added: usize,
+    removed: usize,
+    old_numbers: String,
+    new_numbers: String,
+    code: String,
+    runs: Vec<Run>,
+    /// How wide the rows must be to fit the longest line, gutter and padding included.
+    width: f32,
+}
+
+/// Consecutive diff lines of the same kind.
+struct Run {
+    kind: Kind,
+    lines: usize,
+    /// The run's +/− signs, one line each (empty for unchanged lines).
+    signs: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Context,
+    Added,
+    Removed,
+}
+
+impl Kind {
+    fn of(line: &DiffLine) -> Kind {
+        match line {
+            DiffLine::Context { .. } => Kind::Context,
+            DiffLine::Added { .. } => Kind::Added,
+            DiffLine::Removed { .. } => Kind::Removed,
+        }
+    }
+}
+
+impl DiffView {
+    pub(super) fn new(diff: &Diff) -> DiffView {
+        let (added, removed) = diff.counts();
+        let column = |cell: fn(&DiffLine) -> String| {
+            diff.lines.iter().map(cell).collect::<Vec<_>>().join("\n")
+        };
+        fn number(number: Option<usize>) -> String {
+            number.map(|n| n.to_string()).unwrap_or_default()
+        }
+
+        let mut runs: Vec<Run> = Vec::new();
+        for kind in diff.lines.iter().map(Kind::of) {
+            match runs.last_mut() {
+                Some(run) if run.kind == kind => run.lines += 1,
+                _ => runs.push(Run {
+                    kind,
+                    lines: 1,
+                    signs: String::new(),
+                }),
+            }
+        }
+        for run in &mut runs {
+            let sign = match run.kind {
+                Kind::Context => continue,
+                Kind::Added => "+",
+                Kind::Removed => "−",
+            };
+            run.signs = vec![sign; run.lines].join("\n");
+        }
+
+        DiffView {
+            added,
+            removed,
+            old_numbers: column(|line| number(line.old_number())),
+            new_numbers: column(|line| number(line.new_number())),
+            code: column(|line| display_text(line.text())),
+            runs,
+            width: content_width(diff),
+        }
+    }
+}
 
 impl App {
     /// A header bar (path, which side, +N −N) over the scrollable diff.
@@ -65,26 +152,22 @@ impl App {
         column![
             diff_header(path, *source, diff),
             rule::horizontal(1).style(theme::divider),
-            diff_body(diff, self.diff_width),
+            diff_body(diff),
         ]
         .into()
     }
 }
 
 /// How wide the diff's rows must be to fit its longest line, gutter and padding
-/// included. `load_diff` works it out once per diff rather than `view` on every redraw,
-/// since lines that aren't plain ASCII are measured, which means shaping their text.
-pub(super) fn content_width(diff: &Diff) -> f32 {
-    diff.lines
+/// included. Worked out once per diff (in `DiffView::new`), since lines that aren't
+/// plain ASCII are measured, which means shaping their text.
+fn content_width(diff: &Diff) -> f32 {
+    let code = diff
+        .lines
         .iter()
-        .map(|line| {
-            let code = code_width(line.text());
-            match line {
-                DiffLine::Hunk(_) => code + HUNK_PADDING_X * 2.0,
-                _ => GUTTER_WIDTH + code + CODE_PADDING_RIGHT,
-            }
-        })
-        .fold(0.0, f32::max)
+        .map(|line| code_width(line.text()))
+        .fold(0.0, f32::max);
+    GUTTER_WIDTH + code + CODE_PADDING_RIGHT
 }
 
 /// How wide a line's text is drawn. Plain ASCII, nearly every line, is all Fira Code,
@@ -117,8 +200,7 @@ fn measure(shown: &str) -> f32 {
     .min_width()
 }
 
-fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a, Message> {
-    let (added, removed) = diff.counts();
+fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &DiffView) -> Element<'a, Message> {
     let side = match source {
         DiffSource::Staged => "Staged",
         DiffSource::Unstaged => "Unstaged",
@@ -134,10 +216,10 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a
                 .padding([1.0, 6.0])
                 .style(theme::filled_tag),
             space().width(Fill),
-            text(format!("+{added}"))
+            text(format!("+{}", diff.added))
                 .size(text_sizes::SMALL)
                 .color(colors::ADDED),
-            text(format!("−{removed}"))
+            text(format!("−{}", diff.removed))
                 .size(text_sizes::SMALL)
                 .color(colors::DANGER),
         ]
@@ -150,22 +232,32 @@ fn diff_header<'a>(path: &'a str, source: DiffSource, diff: &Diff) -> Element<'a
     .into()
 }
 
-/// The diff lines, scrollable both ways. Lines don't wrap, so every row is given the same
-/// width: the longest line's (`content_width`), or the panel's if that's wider, so the
-/// tints run edge to edge. (Rows can't just be `Fill`: inside a both-ways scrollable
-/// that lays out empty.)
-fn diff_body(diff: &Diff, content_width: f32) -> Element<'_, Message> {
+/// The whole file, scrollable both ways: the gutter (line numbers and signs) and the
+/// code, each a few texts over a column of tint blocks (see `DiffView`).
+///
+/// Lines don't wrap, so the code is as wide as its longest line (`DiffView::width`), or
+/// the panel if that's wider, so the tints run edge to edge. (Nothing can just be `Fill`:
+/// inside a both-ways scrollable that lays out empty.)
+fn diff_body(diff: &DiffView) -> Element<'_, Message> {
     responsive(move |size| {
-        let width = content_width.max(size.width);
+        let tint_width = diff.width.max(size.width) - GUTTER_WIDTH;
 
-        // The first hunk header sits right under the header bar: no padding on top.
-        let lines = diff
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| diff_line_view(line, width, index == 0));
+        // In a `stack`, the first layer sets the size, and the rest are drawn over it.
+        let gutter = stack![
+            column(diff.runs.iter().map(gutter_run)),
+            row![
+                line_numbers(&diff.old_numbers, OLD_NUMBER_PADDING),
+                line_numbers(&diff.new_numbers, NEW_NUMBER_PADDING),
+            ],
+        ];
+        let code = stack![
+            column(diff.runs.iter().map(|run| code_tint(run, tint_width))),
+            // A fixed width, so the text's bounds don't change when the panel is
+            // resized: that would make iced lay out every line again.
+            mono(diff.code.as_str()).width(diff.width - GUTTER_WIDTH),
+        ];
 
-        scrollable(column(lines).padding(Padding::ZERO.bottom(8.0)))
+        scrollable(row![gutter, code].padding(Padding::ZERO.bottom(8.0)))
             .id(DIFF_SCROLLABLE)
             .direction(Direction::Both {
                 vertical: theme::thin_scrollbar(),
@@ -179,69 +271,52 @@ fn diff_body(diff: &Diff, content_width: f32) -> Element<'_, Message> {
     .into()
 }
 
-/// One diff line. `first` is true for the diff's first line (always a hunk header).
-fn diff_line_view(line: &DiffLine, width: f32, first: bool) -> Element<'_, Message> {
-    let (old, new, sign, gutter_bg, line_bg, sign_color) = match line {
-        DiffLine::Hunk(header) => {
-            // A gap only above later hunks, to set them apart from the lines before;
-            // the lines below follow with no gap, like VS Code.
-            let gap_above = if first { 0.0 } else { 6.0 };
-            return container(
-                container(mono(display_text(header)).color(colors::HUNK_TEXT))
-                    .padding([2.0, HUNK_PADDING_X])
-                    .width(width)
-                    .style(|_| container::background(colors::HUNK_BG)),
-            )
-            .padding(Padding::ZERO.top(gap_above))
-            .into();
-        }
-        DiffLine::Context { old, new, .. } => (
-            Some(*old),
-            Some(*new),
-            " ",
-            colors::BACKGROUND,
-            Color::TRANSPARENT,
-            colors::LINE_NUMBER,
-        ),
-        DiffLine::Added { new, .. } => (
-            None,
-            Some(*new),
-            "+",
-            colors::ADDED_GUTTER,
-            colors::ADDED_TINT,
-            colors::ADDED,
-        ),
-        DiffLine::Removed { old, .. } => (
-            Some(*old),
-            None,
-            "−",
-            colors::REMOVED_GUTTER,
-            colors::REMOVED_TINT,
-            colors::DELETED,
-        ),
+/// The height of `lines` diff lines.
+fn lines_height(lines: usize) -> f32 {
+    lines as f32 * layouts::DIFF_LINE_HEIGHT
+}
+
+/// One run's stretch of the gutter: its background, with the run's +/− signs in the
+/// sign column at its right edge.
+fn gutter_run(run: &Run) -> Element<'_, Message> {
+    let (background, sign_color) = match run.kind {
+        Kind::Context => (colors::BACKGROUND, colors::LINE_NUMBER),
+        Kind::Added => (colors::ADDED_GUTTER, colors::ADDED),
+        Kind::Removed => (colors::REMOVED_GUTTER, colors::DELETED),
     };
 
-    let number = |number: Option<usize>, padding_right: f32| {
-        container(
-            mono(number.map(|n| n.to_string()).unwrap_or_default())
-                .color(colors::LINE_NUMBER)
-                .width(layouts::LINE_NUMBER_WIDTH)
-                .align_x(Right),
-        )
-        .padding(Padding::ZERO.right(padding_right))
+    container(mono(run.signs.as_str()).color(sign_color))
+        .padding(Padding::ZERO.left(GUTTER_WIDTH - layouts::DIFF_SIGN_WIDTH))
+        .width(GUTTER_WIDTH)
+        .height(lines_height(run.lines))
+        .style(move |_| container::background(background))
+        .into()
+}
+
+/// One run's tint behind the code.
+fn code_tint(run: &Run, width: f32) -> Element<'_, Message> {
+    let tint = match run.kind {
+        Kind::Context => Color::TRANSPARENT,
+        Kind::Added => colors::ADDED_TINT,
+        Kind::Removed => colors::REMOVED_TINT,
     };
 
-    container(row![
-        container(row![
-            number(old, OLD_NUMBER_PADDING),
-            number(new, NEW_NUMBER_PADDING),
-            mono(sign).color(sign_color).width(layouts::DIFF_SIGN_WIDTH),
-        ])
-        .style(move |_| container::background(gutter_bg)),
-        mono(display_text(line.text())),
-    ])
-    .width(width)
-    .style(move |_| container::background(line_bg))
+    container(space())
+        .width(width)
+        .height(lines_height(run.lines))
+        .style(move |_| container::background(tint))
+        .into()
+}
+
+/// A column of line numbers, one per line, right-aligned.
+fn line_numbers(numbers: &str, padding_right: f32) -> Element<'_, Message> {
+    container(
+        mono(numbers)
+            .color(colors::LINE_NUMBER)
+            .width(layouts::LINE_NUMBER_WIDTH)
+            .align_x(Right),
+    )
+    .padding(Padding::ZERO.right(padding_right))
     .into()
 }
 
@@ -270,8 +345,12 @@ fn expand_tabs(line: &str) -> Cow<'_, str> {
     }
 }
 
-/// A diff line as it's drawn: tabs expanded, and an invisible word joiner (U+2060)
-/// between every two adjacent ASCII punctuation characters.
+/// A diff line as it's drawn: tabs expanded, carriage returns dropped, and an invisible
+/// word joiner (U+2060) between every two adjacent ASCII punctuation characters.
+///
+/// A `\r` left inside a line (a stray one, or a file with mixed line endings) would
+/// start a new line in the text engine, and every line below it would sit one line off
+/// its line numbers, since each column is one text (see `DiffView`).
 ///
 /// The joiners make Fira Code's ligatures work for every operator. The text engine
 /// (cosmic-text) shapes each run between Unicode line-break opportunities separately,
@@ -284,7 +363,7 @@ fn display_text(line: &str) -> String {
     let mut shown = String::with_capacity(line.len() + line.len() / 4);
     let mut previous_is_punctuation = false;
 
-    for character in line.chars() {
+    for character in line.chars().filter(|&character| character != '\r') {
         let is_punctuation = character.is_ascii_punctuation();
         if previous_is_punctuation && is_punctuation {
             shown.push('\u{2060}');
@@ -311,6 +390,53 @@ mod tests {
     #[test]
     fn test_tabs_are_expanded_first() {
         assert_eq!(display_text("\tx => y"), "    x =\u{2060}> y");
+    }
+
+    #[test]
+    fn test_carriage_returns_are_dropped() {
+        assert_eq!(display_text("a\rb\r"), "ab");
+    }
+
+    #[test]
+    fn test_view_has_one_line_per_diff_line_and_runs_cover_them() {
+        let diff = Diff {
+            lines: vec![
+                DiffLine::Context {
+                    old: 1,
+                    new: 1,
+                    text: "same".to_string(),
+                },
+                DiffLine::Removed {
+                    old: 2,
+                    text: "old".to_string(),
+                },
+                DiffLine::Removed {
+                    old: 3,
+                    text: "older".to_string(),
+                },
+                DiffLine::Added {
+                    new: 2,
+                    text: "new".to_string(),
+                },
+                DiffLine::Context {
+                    old: 4,
+                    new: 3,
+                    text: String::new(),
+                },
+            ],
+        };
+        let view = DiffView::new(&diff);
+
+        assert_eq!((view.added, view.removed), (1, 2));
+        assert_eq!(view.old_numbers, "1\n2\n3\n\n4");
+        assert_eq!(view.new_numbers, "1\n\n\n2\n3");
+        assert_eq!(view.code, "same\nold\nolder\nnew\n");
+        let runs: Vec<_> = view
+            .runs
+            .iter()
+            .map(|run| (run.lines, run.signs.as_str()))
+            .collect();
+        assert_eq!(runs, vec![(1, ""), (2, "−\n−"), (1, "+"), (1, "")]);
     }
 
     /// Loads Fira Code into iced's font system, as the app does at startup.

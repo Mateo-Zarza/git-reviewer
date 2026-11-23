@@ -37,8 +37,6 @@ pub mod colors {
     pub const REMOVED_TINT: Color = color!(0xf0857a, 0.13);
     pub const ADDED_GUTTER: Color = color!(0x252f2a);
     pub const REMOVED_GUTTER: Color = color!(0x342728);
-    pub const HUNK_BG: Color = color!(0x22252c);
-    pub const HUNK_TEXT: Color = color!(0x8fa6c8);
 }
 
 // Everything is 2px above the mockup's sizes (asked for 2026-11-21: easier to read on
