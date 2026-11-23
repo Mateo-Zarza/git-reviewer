@@ -421,6 +421,13 @@ pub fn thin_scrollbar() -> scrollable::Scrollbar {
         .margin(2)
 }
 
+/// `thin_scrollbar` in iced's embedded mode: while the content overflows, the scrollable
+/// pads its right side by the bar's full 10px and draws the bar there, so the bar never
+/// covers the content. With no overflow nothing is reserved.
+pub fn embedded_scrollbar() -> scrollable::Scrollbar {
+    thin_scrollbar().spacing(0)
+}
+
 /// Every scrollbar in the app: no track, a PILL-grey thumb that lightens on hover/drag.
 pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     let rail = |active: bool| scrollable::Rail {

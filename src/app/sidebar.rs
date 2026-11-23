@@ -17,28 +17,35 @@ impl App {
     pub(super) fn sidebar<'a>(&'a self, workspace: &'a Workspace) -> Element<'a, Message> {
         let selected = self.selected_worktree_path.as_deref();
 
+        // The panel's padding goes inside the scrollable, so the bar runs the panel's full
+        // height against the divider, like VS Code's, and its 10px come out of the rows'
+        // width instead of being drawn over their right end (see `embedded_scrollbar`).
         container(
             scrollable(
-                column![
-                    container(theme::label(&format!(
-                        "REPOSITORIES · {}",
-                        workspace.repos().len()
-                    )))
-                    .padding([0.0, 8.0]),
-                    column(workspace.repos().iter().map(|repo| {
-                        let open = self.is_open(&Section::Repo(repo.name().to_string()));
-                        repo_view(repo, selected, open)
-                    }))
+                container(
+                    column![
+                        container(theme::label(&format!(
+                            "REPOSITORIES · {}",
+                            workspace.repos().len()
+                        )))
+                        .padding([0.0, 8.0]),
+                        column(workspace.repos().iter().map(|repo| {
+                            let open = self.is_open(&Section::Repo(repo.name().to_string()));
+                            repo_view(repo, selected, open)
+                        }))
+                        .spacing(layouts::REPO_GAP),
+                    ]
                     .spacing(layouts::REPO_GAP),
-                ]
-                .spacing(layouts::REPO_GAP),
+                )
+                .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X]),
             )
-            .direction(Direction::Vertical(theme::thin_scrollbar()))
-            .style(theme::scrollbar),
+            .direction(Direction::Vertical(theme::embedded_scrollbar()))
+            .style(theme::scrollbar)
+            .width(Fill)
+            .height(Fill),
         )
         .width(Fill)
         .height(Fill)
-        .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X])
         .style(|_| container::background(colors::SIDEBAR))
         .into()
     }
