@@ -1,7 +1,7 @@
 //! Syntax highlighting for the diff: syntect, with two-face's syntaxes (about 200
 //! languages) and Catppuccin Mocha's colors (`assets/themes`).
 //!
-//! It takes a while on big files (about 0.1 s per 5000 lines in a release build), so
+//! It takes a while on big files (about 0.35 s per 5000 lines), so
 //! it's meant to run once per diff, off the UI thread.
 
 use std::io::Cursor;
