@@ -11,8 +11,11 @@ use iced::{Alignment::Center, Border, Color, Element, Fill, Padding, alignment::
 use iced_palace::widget::ellipsized_text;
 
 use std::f32::consts::TAU;
+use std::sync::LazyLock;
 
-use iced::{Radians, Rotation};
+use iced::advanced::text::{self as advanced_text, Paragraph as _, Text};
+use iced::widget::text::{LineHeight, Shaping};
+use iced::{Font, Radians, Rotation, Size, alignment};
 
 use super::file_icon::file_icon;
 use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
@@ -366,12 +369,53 @@ impl App {
         };
 
         row![
-            footer_button("Rm. worktree", Removal::Worktree, worktree_removable),
-            footer_button("Del. branch", Removal::Branch, branch_deletable),
+            footer_button(RM_WORKTREE, Removal::Worktree, worktree_removable),
+            footer_button(DEL_BRANCH, Removal::Branch, branch_deletable),
         ]
         .spacing(layouts::GAP)
         .into()
     }
+}
+
+const RM_WORKTREE: &str = "Rm. worktree";
+const DEL_BRANCH: &str = "Del. branch";
+
+/// The narrowest the panel can be with the footer buttons' labels still on one line:
+/// its padding, the gap, and two buttons as wide as the widest label plus the buttons'
+/// default padding. Measured once, because the labels' width depends on the system
+/// font (Segoe UI, San Francisco).
+pub(super) fn min_width() -> f32 {
+    static MIN_WIDTH: LazyLock<f32> = LazyLock::new(|| {
+        let widest = [RM_WORKTREE, DEL_BRANCH]
+            .map(label_width)
+            .into_iter()
+            .fold(0.0, f32::max);
+        let padding = button::DEFAULT_PADDING;
+        let button = widest + padding.left + padding.right;
+        // Rounded up: a label wraps when it's even a fraction wider than its room.
+        (2.0 * layouts::PANEL_PADDING_X + layouts::GAP + 2.0 * button).ceil()
+    });
+    *MIN_WIDTH
+}
+
+/// How wide `label` is on one line, as a plain `text` draws it: the default font and
+/// size (main.rs sets no default font, so it's `Font::DEFAULT`). iced measures with the
+/// same font system it renders with, so no window is needed.
+fn label_width(label: &str) -> f32 {
+    type Paragraph = <iced::Renderer as advanced_text::Renderer>::Paragraph;
+
+    Paragraph::with_text(Text {
+        content: label,
+        bounds: Size::INFINITE,
+        size: text_sizes::BODY.into(),
+        line_height: LineHeight::default(),
+        font: Font::DEFAULT,
+        align_x: advanced_text::Alignment::Default,
+        align_y: alignment::Vertical::Top,
+        shaping: Shaping::default(),
+        wrapping: Wrapping::None,
+    })
+    .min_width()
 }
 
 /// The commit box's key handling: Ctrl+Enter (Cmd+Enter on macOS, which is what

@@ -71,8 +71,17 @@ pub mod layouts {
 
     // Bars and panels
     pub const TOP_BAR_HEIGHT: f32 = 48.0;
-    pub const SIDEBAR_WIDTH: f32 = 260.0;
-    pub const CHANGES_WIDTH: f32 = 280.0;
+    // Panel widths: draggable (see app/panels.rs), from these defaults down to these
+    // minimums. 170 is VS Code's sidebar minimum. The changes panel's minimum is
+    // measured from its footer's labels instead (`changes::min_width`).
+    pub const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
+    pub const SIDEBAR_MIN_WIDTH: f32 = 170.0;
+    pub const CHANGES_DEFAULT_WIDTH: f32 = 280.0;
+    pub const DIFF_MIN_WIDTH: f32 = 300.0;
+    /// The 1px line between panels.
+    pub const DIVIDER_WIDTH: f32 = 1.0;
+    /// The grab area centered on a divider: odd, so it overhangs the line evenly.
+    pub const DIVIDER_HANDLE_WIDTH: f32 = 5.0;
     // Buttons
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;

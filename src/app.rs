@@ -5,6 +5,7 @@
 mod changes;
 mod diff;
 mod file_icon;
+mod panels;
 mod sidebar;
 mod watch;
 
@@ -25,9 +26,12 @@ use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DIFF_SCROLLABLE;
+use panels::Divider;
+pub use panels::{PanelWidths, min_window_width};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -70,6 +74,13 @@ pub enum Message {
     ToggleSection(Section),
     /// The error toast's close button was clicked.
     DismissError,
+    /// The mouse went down on a divider between panels.
+    DividerGrabbed(Divider),
+    /// The cursor's x while a divider is dragged.
+    DividerDragged(f32),
+    DividerReleased,
+    /// The window's new width.
+    WindowResized(f32),
 }
 
 /// A list section that folds away when its header is clicked, like VS Code's.
@@ -163,6 +174,14 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// What's remembered between runs in `state.toml`: the panel widths the user dragged
+    /// to (what's shown may be narrower: see `PanelWidths::fitted`).
+    state: State,
+    /// The divider being dragged, if any, and the panel widths when the drag started
+    /// (every move is worked out from them: see `PanelWidths::dragged`).
+    dragging: Option<(Divider, PanelWidths)>,
+    /// Infinite until the window first reports its size, which it does when it opens.
+    window_width: f32,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
@@ -222,6 +241,9 @@ impl App {
             base_counts: None,
             base_error: None,
             collapsed: HashSet::new(),
+            state: State::load(),
+            dragging: None,
+            window_width: f32::INFINITY,
         };
         app.workspace = app.scan();
         app
@@ -548,6 +570,24 @@ impl App {
                 }
             }
             Message::DismissError => self.error = None,
+            Message::DividerGrabbed(divider) => {
+                self.dragging = Some((divider, self.state.panels));
+            }
+            Message::DividerDragged(x) => {
+                if let Some((divider, start)) = self.dragging {
+                    self.state.panels = start.dragged(divider, x, self.window_width);
+                }
+            }
+            Message::DividerReleased => {
+                self.dragging = None;
+                // Saved once, when the drag ends, rather than on every move.
+                if let Err(err) = self.state.save() {
+                    self.error = Some(AppError::Message(format!(
+                        "Couldn't save the panel widths: {err}"
+                    )));
+                }
+            }
+            Message::WindowResized(width) => self.window_width = width,
         }
         Task::none()
     }
@@ -562,10 +602,19 @@ impl App {
     }
 
     /// Watches every worktree's folder so the app refreshes itself after edits or
-    /// terminal git commands.
+    /// terminal git commands; also follows the window's width, and the cursor while a
+    /// divider is dragged.
     pub fn subscription(&self) -> Subscription<Message> {
+        // Always on, even without a workspace: the window reports its first size once,
+        // when it opens.
+        let window_width = panels::window_width();
+        let drag = match self.dragging {
+            Some(_) => panels::drag_events(),
+            None => Subscription::none(),
+        };
+
         let Ok(workspace) = &self.workspace else {
-            return Subscription::none();
+            return Subscription::batch([window_width, drag]);
         };
 
         let mut paths: Vec<PathBuf> = workspace
@@ -585,7 +634,7 @@ impl App {
             None => Subscription::none(),
         };
 
-        Subscription::batch([watch::subscription(paths), spinner])
+        Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -617,18 +666,27 @@ impl App {
                 .center(Fill)
                 .into()
             }
-            Ok(workspace) => row![
-                self.sidebar(workspace),
-                rule::vertical(1).style(theme::divider),
-                container(self.changes_panel())
-                    .width(layouts::CHANGES_WIDTH)
-                    .height(Fill)
-                    .style(|_| container::background(colors::SURFACE)),
-                rule::vertical(1).style(theme::divider),
-                container(self.diff_panel()).width(Fill).height(Fill),
-            ]
-            .height(Fill)
-            .into(),
+            Ok(workspace) => {
+                let widths = self.state.panels.fitted(self.window_width);
+                // The dividers' grab areas lie over the panels rather than between them.
+                stack![
+                    row![
+                        container(self.sidebar(workspace))
+                            .width(widths.sidebar)
+                            .height(Fill),
+                        rule::vertical(1).style(theme::divider),
+                        container(self.changes_panel())
+                            .width(widths.changes)
+                            .height(Fill)
+                            .style(|_| container::background(colors::SURFACE)),
+                        rule::vertical(1).style(theme::divider),
+                        container(self.diff_panel()).width(Fill).height(Fill),
+                    ]
+                    .height(Fill),
+                    panels::handles(widths),
+                ]
+                .into()
+            }
         };
 
         let window = column![
@@ -637,12 +695,16 @@ impl App {
             body
         ];
 
-        // The toast floats over the window as a second layer. The window stays the first
+        // The toast floats over the window as a second layer, and while a divider is
+        // dragged its overlay goes on top of everything. The window stays the first
         // layer either way, so its widgets keep their state (scroll offsets, the commit
-        // box's cursor) when a toast comes or goes.
+        // box's cursor) when a toast or a drag comes or goes.
         let mut layers = stack![window].width(Fill).height(Fill);
         if let Some(toast) = self.error_toast() {
             layers = layers.push(toast);
+        }
+        if self.dragging.is_some() {
+            layers = layers.push(panels::drag_overlay());
         }
         layers.into()
     }
