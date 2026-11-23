@@ -66,6 +66,8 @@ pub(super) struct DiffView {
     runs: Vec<Run>,
     /// How wide the rows must be to fit the longest line, gutter and padding included.
     width: f32,
+    /// A binary file: a message is shown instead of lines (it has none).
+    binary: bool,
 }
 
 /// `CHUNK_LINES` consecutive diff lines (the last chunk may have fewer), one text per
@@ -212,7 +214,8 @@ impl DiffView {
             }
         }
 
-        let highlighting = if highlight::highlights(path, &diff) {
+        // A binary file has no lines to color.
+        let highlighting = if !diff.binary && highlight::highlights(path, &diff) {
             Highlighting::NotStarted
         } else {
             Highlighting::Done
@@ -226,6 +229,7 @@ impl DiffView {
             chunks: chunks(&diff, None),
             runs,
             width: content_width(&diff),
+            binary: diff.binary,
             diff: Arc::new(diff),
             highlighting,
             next: None,
@@ -250,9 +254,15 @@ impl DiffView {
         self.highlighting != Highlighting::Done
     }
 
-    /// (added, removed) line counts, for the header's +N −N.
-    pub(super) fn counts(&self) -> (usize, usize) {
-        (self.added, self.removed)
+    /// (added, removed) line counts, for the header's +N −N. `None` for a binary file:
+    /// it has no lines to count, and +0 −0 would read as "nothing changed".
+    pub(super) fn counts(&self) -> Option<(usize, usize)> {
+        (!self.binary).then_some((self.added, self.removed))
+    }
+
+    /// Whether it's a binary file, which has no lines to show.
+    pub(super) fn is_binary(&self) -> bool {
+        self.binary
     }
 
     /// Keeps this on screen until `next`, a newer version of the same diff, is
@@ -345,9 +355,16 @@ impl App {
                     .center(Fill)
                     .into();
             }
-            (Some(Ok(diff)), None) => (Some(diff.counts()), diff_body(diff, self.diff_scroll_y)),
+            // A binary file has no lines to show (VS Code says so too).
+            (Some(Ok(diff)), None) if diff.is_binary() => (
+                None,
+                empty_state("Binary file not shown", colors::TEXT_MUTED)
+                    .center(Fill)
+                    .into(),
+            ),
+            (Some(Ok(diff)), None) => (diff.counts(), diff_body(diff, self.diff_scroll_y)),
             // Highlighting: the counts are known. Still being read: they're not.
-            (Some(Ok(diff)), Some(elapsed)) => (Some(diff.counts()), loading(elapsed)),
+            (Some(Ok(diff)), Some(elapsed)) => (diff.counts(), loading(elapsed)),
             (None, elapsed) => (None, loading(elapsed.unwrap_or_default())),
         };
 
@@ -423,7 +440,8 @@ fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
     .into()
 }
 
-/// `counts` is (added, removed), or `None` while the diff is still being read.
+/// `counts` is (added, removed), or `None` while the diff is still being read, and for
+/// a binary file (see `DiffView::counts`).
 fn diff_header<'a>(
     path: &'a str,
     source: DiffSource,
@@ -770,6 +788,7 @@ mod tests {
                     text: String::new(),
                 },
             ],
+            binary: false,
         };
         let view = DiffView::new("x", DiffSource::Unstaged, diff);
 
@@ -797,6 +816,7 @@ mod tests {
                     text: n.to_string(),
                 })
                 .collect(),
+            binary: false,
         };
         let view = DiffView::new("x", DiffSource::Unstaged, diff);
 
@@ -841,6 +861,7 @@ mod tests {
                     text: "ab".to_string(),
                 })
                 .collect(),
+            binary: false,
         };
         // Only the last line (alone in the second chunk) is colored.
         let mut colors = vec![LineColors::new(); diff.lines.len()];
@@ -849,7 +870,11 @@ mod tests {
         assert!(view.is_loading());
 
         // Colors worked out for another diff (one shown before) are dropped.
-        view.set_colors(&Arc::new(Diff { lines: Vec::new() }), Some(&colors));
+        let other = Diff {
+            lines: Vec::new(),
+            binary: false,
+        };
+        view.set_colors(&Arc::new(other), Some(&colors));
         assert_eq!(view.chunks[1].code.colors, vec![(0..2, None)]);
         assert!(view.is_loading());
 
@@ -868,6 +893,7 @@ mod tests {
                 new: 1,
                 text: text.to_string(),
             }],
+            binary: false,
         }
     }
 
@@ -883,6 +909,20 @@ mod tests {
         assert!(view.start_highlighting().is_some());
         assert!(view.start_highlighting().is_none());
         assert!(view.is_loading());
+    }
+
+    #[test]
+    fn test_binary_files_are_neither_highlighted_nor_counted() {
+        let diff = Diff {
+            lines: Vec::new(),
+            binary: true,
+        };
+        // A name we'd highlight, but there are no lines.
+        let view = DiffView::new("logo.rs", DiffSource::Unstaged, diff);
+
+        assert!(!view.is_loading());
+        assert!(view.is_binary());
+        assert_eq!(view.counts(), None);
     }
 
     #[test]

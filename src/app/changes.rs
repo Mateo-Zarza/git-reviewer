@@ -510,16 +510,33 @@ pub(super) fn icon_button<'a>(
     message: Message,
     on_selected_row: bool,
 ) -> Button<'a, Message> {
+    sized_icon_button(
+        bytes,
+        message,
+        on_selected_row,
+        layouts::ICON_BUTTON,
+        icon_sizes::ROW,
+    )
+}
+
+/// `icon_button` at another size: a `size`-square button holding an `icon_size` icon.
+pub(super) fn sized_icon_button<'a>(
+    bytes: &'static [u8],
+    message: Message,
+    on_selected_row: bool,
+    size: f32,
+    icon_size: f32,
+) -> Button<'a, Message> {
     // Pinned at a whole-pixel offset rather than centered: centering 15px in 24px puts
     // the icon at 4.5px, a half pixel, which smears its thin strokes across two pixel
     // columns (the + looked dim). Half a pixel off-center isn't visible; blur is.
-    let before = ((layouts::ICON_BUTTON - icon_sizes::ROW) / 2.0).floor();
-    let after = layouts::ICON_BUTTON - icon_sizes::ROW - before;
+    let before = ((size - icon_size) / 2.0).floor();
+    let after = size - icon_size - before;
 
-    button(icon(bytes, icon_sizes::ROW, colors::TEXT_MUTED))
+    button(icon(bytes, icon_size, colors::TEXT_MUTED))
         .on_press(message)
-        .width(layouts::ICON_BUTTON)
-        .height(layouts::ICON_BUTTON)
+        .width(size)
+        .height(size)
         .padding(Padding {
             top: before,
             left: before,

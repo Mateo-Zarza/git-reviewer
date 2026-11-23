@@ -224,6 +224,35 @@ mod tests {
         assert!(!status.is_upstream_gone());
     }
 
+    /// `Worktree::status` asks for `--untracked-files=all`, so files inside an untracked
+    /// folder come one per entry, with their full path, not folded into `dist/`.
+    #[test]
+    fn test_parse_files_in_untracked_folders() {
+        let output = "# branch.oid f446061e...\0\
+                            # branch.head main\0\
+                            ? dist/bundle.min.js\0\
+                            ? web/App.tsx\0\
+                            ? web/components/Button.tsx\0";
+
+        let status = Status::parse(output);
+
+        let paths: Vec<&str> = status.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "dist/bundle.min.js",
+                "web/App.tsx",
+                "web/components/Button.tsx"
+            ]
+        );
+        for file in &status.files {
+            assert_eq!(file.staged, None);
+            assert_eq!(file.unstaged, Some(ChangeKind::Untracked));
+            assert_eq!(file.old_path, None);
+        }
+        assert_eq!(status.change_count(), 3);
+    }
+
     #[test]
     fn test_parse_no_upstream() {
         let output = "# branch.oid f446061e...\0\

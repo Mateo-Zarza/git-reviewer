@@ -158,6 +158,7 @@ mod tests {
                     text: text.to_string(),
                 })
                 .collect(),
+            binary: false,
         }
     }
 
@@ -210,6 +211,7 @@ mod tests {
                     text: "end */".to_string(),
                 },
             ],
+            binary: false,
         };
         let colors = diff_colors("x.rs", &diff).expect("Rust");
 

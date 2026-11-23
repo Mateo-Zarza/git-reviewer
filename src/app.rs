@@ -10,7 +10,7 @@ mod sidebar;
 mod sticky;
 mod watch;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::env::args;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
@@ -96,6 +96,17 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
+    /// A repo's archive button was clicked, with the repo's folder.
+    ArchiveRepo(PathBuf),
+    /// An archived repo's unarchive button was clicked, with the repo's folder.
+    UnarchiveRepo(PathBuf),
+    /// The sidebar's Archived header was clicked: open or close the list.
+    ToggleArchived,
+    /// The cursor entered (`hovered`) or left a repo's header in the sidebar.
+    RepoHovered {
+        repo: PathBuf,
+        hovered: bool,
+    },
     /// The error toast's close button was clicked.
     DismissError,
     /// The mouse went down on a divider between panels.
@@ -256,6 +267,9 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
+    /// button in place of its worktree count.
+    hovered_repo: Option<PathBuf>,
     /// What's remembered between runs in `state.toml`: the panel widths the user dragged
     /// to (what's shown may be narrower: see `PanelWidths::fitted`).
     state: State,
@@ -329,6 +343,7 @@ impl App {
             base_counts: None,
             base_error: None,
             collapsed: HashSet::new(),
+            hovered_repo: None,
             state: State::load(),
             dragging: None,
             window_width: f32::INFINITY,
@@ -445,8 +460,17 @@ impl App {
     /// show the old one any longer (startup, another root). Everything else uses
     /// `rescan`.
     fn scan_now(&mut self) {
-        self.workspace = scan_root(self.root.as_deref());
+        self.workspace = scan_root(self.root.as_deref(), &self.state.sidebar.archived);
         self.workspace_version += 1;
+    }
+
+    /// Drops the result of a rescan that's running, and queues a fresh one: for changes
+    /// that scan would undo, as it read the repos (or the archived list) before them.
+    fn invalidate_scans(&mut self) {
+        self.workspace_version += 1;
+        if self.rescan == Rescan::Running {
+            self.rescan = Rescan::Queued;
+        }
     }
 
     /// Scans the workspace again, on a thread of its own (see `on_thread`): that's a
@@ -462,8 +486,9 @@ impl App {
             Rescan::Idle => {
                 self.rescan = Rescan::Running;
                 let (root, version) = (self.root.clone(), self.workspace_version);
+                let archived = self.state.sidebar.archived.clone();
                 on_thread(move || {
-                    let workspace = Arc::new(scan_root(root.as_deref()));
+                    let workspace = Arc::new(scan_root(root.as_deref(), &archived));
                     Scanned { version, workspace }
                 })
                 .map(Message::Rescanned)
@@ -568,7 +593,7 @@ impl App {
                 let removed = result.is_ok();
                 self.report(result);
                 // A scan that started before this still lists the removed worktree.
-                self.workspace_version += 1;
+                self.invalidate_scans();
                 let mut tasks = vec![self.rescan()];
                 if removed && self.selected_worktree_path.as_ref() == Some(&worktree) {
                     tasks.push(self.select_worktree(None));
@@ -755,6 +780,62 @@ impl App {
                     self.collapsed.insert(section);
                 }
             }
+            Message::ArchiveRepo(repo) => {
+                // An archived repo's worktrees aren't listed or refreshed any more, so
+                // its selected worktree would be left on screen going stale.
+                let task = if self
+                    .selected_repo()
+                    .is_some_and(|selected| selected.path() == repo)
+                {
+                    self.select_worktree(None)
+                } else {
+                    Task::none()
+                };
+                // Moved rather than rescanned: a rescan runs git in every repo, which
+                // takes most of a second. One that's running read the old archived
+                // list, so it would put the repo back: it's redone.
+                if let Ok(workspace) = &mut self.workspace {
+                    workspace.archive(&repo);
+                }
+                self.invalidate_scans();
+                // Its row is gone, so its `on_exit` never comes: without this, the repo
+                // would come back from the Archived list showing its archive button.
+                if self.hovered_repo.as_ref() == Some(&repo) {
+                    self.hovered_repo = None;
+                }
+                self.state.sidebar.archived.insert(repo);
+                self.save_state("the archived repos");
+                return task;
+            }
+            Message::UnarchiveRepo(repo) => {
+                // Only this repo is reopened. The watcher picks its worktrees up, since
+                // the list it's keyed on changes.
+                let result = match &mut self.workspace {
+                    Ok(workspace) => workspace.unarchive(&repo),
+                    Err(_) => Ok(()),
+                };
+                // A repo git can't open stays archived, so the list and the file agree.
+                if result.is_ok() {
+                    self.state.sidebar.archived.remove(&repo);
+                    self.save_state("the archived repos");
+                    // As when archiving: a running rescan read the old archived list.
+                    self.invalidate_scans();
+                }
+                self.report(result);
+            }
+            Message::RepoHovered { repo, hovered } => {
+                if hovered {
+                    self.hovered_repo = Some(repo);
+                } else if self.hovered_repo.as_ref() == Some(&repo) {
+                    // Only the row being left: when moving between rows, the next one's
+                    // enter may arrive before this exit.
+                    self.hovered_repo = None;
+                }
+            }
+            Message::ToggleArchived => {
+                self.state.sidebar.archived_open = !self.state.sidebar.archived_open;
+                self.save_state("the Archived list's state");
+            }
             Message::DismissError => self.error = None,
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
@@ -767,11 +848,7 @@ impl App {
             Message::DividerReleased => {
                 self.dragging = None;
                 // Saved once, when the drag ends, rather than on every move.
-                if let Err(err) = self.state.save() {
-                    self.error = Some(AppError::Message(format!(
-                        "Couldn't save the panel widths: {err}"
-                    )));
-                }
+                self.save_state("the panel widths");
             }
             Message::WindowResized(width) => self.window_width = width,
         }
@@ -784,6 +861,14 @@ impl App {
     fn report<T>(&mut self, result: Result<T, GitError>) {
         if let Err(err) = result {
             self.error = Some(err.into());
+        }
+    }
+
+    /// Writes `state.toml`. A failure is shown in the toast, naming `what` wasn't saved;
+    /// the change still applies until the app closes.
+    fn save_state(&mut self, what: &str) {
+        if let Err(err) = self.state.save() {
+            self.error = Some(AppError::Message(format!("Couldn't save {what}: {err}")));
         }
     }
 
@@ -1219,10 +1304,6 @@ fn removal_question(plan: &RemovalPlan) -> String {
 /// The discard confirmation, saying exactly what the plan will lose.
 fn discard_question(plan: &DiscardPlan) -> String {
     match plan.files.as_slice() {
-        [(path, true)] if path.ends_with('/') => format!(
-            "Delete the untracked folder {path} and everything in it (except ignored \
-             files)?\n\n{WARNING}"
-        ),
         [(path, true)] => format!("Delete the untracked file {path}?\n\n{WARNING}"),
         [(path, false)] => format!("Discard the changes in {path}?\n\n{WARNING}"),
         files => {
@@ -1267,8 +1348,9 @@ fn config_error(err: ConfigError) -> AppError {
     AppError::Message(format!("Config: {err}"))
 }
 
-/// The workspace under `root`, or why there isn't one.
-fn scan_root(root: Option<&Path>) -> Result<Workspace, AppError> {
+/// The workspace under `root`, or why there isn't one. The `archived` repos (by folder)
+/// are opened without their statuses.
+fn scan_root(root: Option<&Path>, archived: &BTreeSet<PathBuf>) -> Result<Workspace, AppError> {
     match root {
         // A relative root (hand-written in the config) would depend on where the app
         // was launched from, which for a macOS app opened from Finder is `/`.
@@ -1276,7 +1358,7 @@ fn scan_root(root: Option<&Path>) -> Result<Workspace, AppError> {
             "Config: root `{}` must be an absolute path",
             root.display()
         ))),
-        Some(root) => Workspace::scan(root).map_err(AppError::from),
+        Some(root) => Workspace::scan(root, |repo| archived.contains(repo)).map_err(AppError::from),
         None => Err(AppError::Message(
             "No folder to show yet. Choose the folder that holds your repos.".to_string(),
         )),

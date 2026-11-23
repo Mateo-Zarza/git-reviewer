@@ -61,6 +61,8 @@ pub mod icon_sizes {
     pub const CHEVRON: f32 = 14.0;
     /// The diff's loading spinner.
     pub const SPINNER: f32 = 24.0;
+    /// The sidebar's archive/unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
+    pub const SIDEBAR_BUTTON: f32 = 14.0;
 }
 
 pub mod layouts {
@@ -86,6 +88,9 @@ pub mod layouts {
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;
     pub const ICON_BUTTON: f32 = 24.0;
+    /// The sidebar's archive/unarchive buttons: smaller, like VS Code's tree-row actions,
+    /// so they fit the repo rows without making them taller.
+    pub const SIDEBAR_ICON_BUTTON: f32 = 20.0;
     /// File rows and section headers in the changes list.
     pub const LIST_ROW_HEIGHT: f32 = 32.0;
     /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
@@ -116,6 +121,9 @@ pub mod layouts {
     pub const GAP: f32 = 8.0;
     pub const SECTION_GAP: f32 = 10.0;
     pub const REPO_GAP: f32 = 14.0;
+    /// The sidebar's Archived list scrolls past this height (about six rows), so an
+    /// open list never takes over the repos above it.
+    pub const ARCHIVED_LIST_MAX_HEIGHT: f32 = 180.0;
 
     // Sidebar tags ("main", "gone"): the label's line box and the padding around it,
     // chosen so the lowercase letters sit centered between the borders. Segoe UI's line
@@ -217,6 +225,8 @@ pub mod icons {
     pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
     pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
     pub const SPINNER: &[u8] = include_bytes!("../assets/icons/spinner.svg");
+    pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
+    pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
     pub fn chevron<'a>(open: bool) -> Svg<'a> {
@@ -422,6 +432,13 @@ pub fn thin_scrollbar() -> scrollable::Scrollbar {
         .width(6)
         .scroller_width(6)
         .margin(2)
+}
+
+/// `thin_scrollbar` in iced's embedded mode: while the content overflows, the scrollable
+/// pads its right side by the bar's full 10px and draws the bar there, so the bar never
+/// covers the content. With no overflow nothing is reserved.
+pub fn embedded_scrollbar() -> scrollable::Scrollbar {
+    thin_scrollbar().spacing(0)
 }
 
 /// Every scrollbar in the app: no track, a PILL-grey thumb that lightens on hover/drag.
