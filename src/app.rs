@@ -13,9 +13,11 @@ mod watch;
 use std::collections::HashSet;
 use std::env::args;
 use std::fmt;
-use std::path::{PathBuf, absolute};
+use std::path::{Path, PathBuf, absolute};
 use std::sync::Arc;
+use std::thread;
 
+use iced::futures::channel::oneshot;
 use iced::widget::operation;
 use iced::widget::scrollable::{Direction, RelativeOffset};
 use iced::widget::{
@@ -48,6 +50,8 @@ pub enum Message {
     /// The syntax colors of a diff's lines are worked out (see
     /// `DiffView::start_highlighting`); `None` if it's not a language we highlight.
     DiffHighlighted(Arc<Diff>, Option<Vec<LineColors>>),
+    /// A rescan is done (see `App::rescan`); `None` if its thread panicked.
+    Rescanned(Option<Scanned>),
     Refresh,
     /// Something changed on disk in a worktree (from the file watcher).
     FilesChanged,
@@ -146,6 +150,32 @@ pub struct DiscardPlan {
     files: Vec<(String, bool)>,
 }
 
+/// A workspace scanned on its own thread (see `App::rescan`), and the
+/// `App::workspace_version` it was started at. The workspace is in an `Arc` only
+/// because a `Message` must be `Clone`; it never actually gets cloned, so
+/// `Arc::unwrap_or_clone` takes it out for free.
+#[derive(Clone)]
+pub struct Scanned {
+    version: u64,
+    workspace: Arc<Result<Workspace, AppError>>,
+}
+
+/// By hand, since the git types have no `Debug` (a `Message` needs one).
+impl fmt::Debug for Scanned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Scanned(version {})", self.version)
+    }
+}
+
+/// Where the background rescan is at (see `App::rescan`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Rescan {
+    Idle,
+    Running,
+    /// Running, and another one is due once it's done.
+    Queued,
+}
+
 /// A push/pull running in the background, which the primary button shows as busy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RemoteOp {
@@ -155,6 +185,11 @@ enum RemoteOp {
 
 pub struct App {
     workspace: Result<Workspace, AppError>,
+    rescan: Rescan,
+    /// Goes up with every scan done right away (`scan_now`), so a background one
+    /// started before it is dropped: it read the repos before whatever that was for
+    /// (a worktree removed, another root).
+    workspace_version: u64,
     /// The Sync or Publish in flight and when it started (the spinner's angle comes
     /// from the elapsed time). `None` when idle.
     remote_op: Option<(RemoteOp, Instant)>,
@@ -236,6 +271,8 @@ impl App {
 
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
+            rescan: Rescan::Idle,
+            workspace_version: 0,
             remote_op: None,
             dialog_open: false,
             selected_worktree_path: None,
@@ -255,7 +292,7 @@ impl App {
             dragging: None,
             window_width: f32::INFINITY,
         };
-        app.workspace = app.scan();
+        app.scan_now();
         app
     }
 
@@ -328,7 +365,7 @@ impl App {
         });
         self.report(result);
 
-        self.workspace = self.scan();
+        self.scan_now();
         // If the selected worktree was the one removed, there's nothing left to show.
         if self.selected_worktree().is_none() {
             self.selected_worktree_path = None;
@@ -352,22 +389,41 @@ impl App {
         self.selected_worktree_path = None;
         self.selected_file = None;
         self.diff = None;
-        self.workspace = self.scan();
+        self.scan_now();
         self.load_status();
     }
 
-    fn scan(&self) -> Result<Workspace, AppError> {
-        match &self.root {
-            // A relative root (hand-written in the config) would depend on where the app
-            // was launched from, which for a macOS app opened from Finder is `/`.
-            Some(root) if root.is_relative() => Err(AppError::Message(format!(
-                "Config: root `{}` must be an absolute path",
-                root.display()
-            ))),
-            Some(root) => Workspace::scan(root).map_err(AppError::from),
-            None => Err(AppError::Message(
-                "No folder to show yet. Choose the folder that holds your repos.".to_string(),
-            )),
+    /// Scans the workspace right away, on the UI thread: for the moments that can't
+    /// show the old one any longer (startup, another root, a worktree just removed).
+    /// Everything else uses `rescan`.
+    fn scan_now(&mut self) {
+        self.workspace = scan_root(self.root.as_deref());
+        self.workspace_version += 1;
+    }
+
+    /// Scans the workspace again, on a thread of its own (see `on_thread`): that's a
+    /// few git calls per worktree (half a second for 25 worktrees, measured), and the
+    /// app must keep responding meanwhile. The result comes back as
+    /// `Message::Rescanned`.
+    ///
+    /// One at a time: a rescan asked for while one runs is queued, once however often
+    /// it's asked for (file changes come in bursts), and starts when that one is done.
+    /// The running one may have read the repos before whatever changed.
+    fn rescan(&mut self) -> Task<Message> {
+        match self.rescan {
+            Rescan::Idle => {
+                self.rescan = Rescan::Running;
+                let (root, version) = (self.root.clone(), self.workspace_version);
+                on_thread(move || {
+                    let workspace = Arc::new(scan_root(root.as_deref()));
+                    Scanned { version, workspace }
+                })
+                .map(Message::Rescanned)
+            }
+            Rescan::Running | Rescan::Queued => {
+                self.rescan = Rescan::Queued;
+                Task::none()
+            }
         }
     }
 
@@ -402,9 +458,29 @@ impl App {
                         Err(err) => self.error = Some(config_error(err)),
                     }
                 }
-                self.workspace = self.scan();
-                self.load_status();
-                self.retarget_selected_file();
+                return self.rescan();
+            }
+            Message::Rescanned(scan) => {
+                let queued = self.rescan == Rescan::Queued;
+                self.rescan = Rescan::Idle;
+                match scan {
+                    // Dropped if the workspace was scanned right away meanwhile (see
+                    // `workspace_version`).
+                    Some(Scanned { version, workspace }) if version == self.workspace_version => {
+                        self.workspace = Arc::unwrap_or_clone(workspace);
+                        self.load_status();
+                        self.retarget_selected_file();
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.error = Some(AppError::Message(
+                            "Refreshing stopped unexpectedly (an internal error)".to_string(),
+                        ));
+                    }
+                }
+                if queued {
+                    return self.rescan();
+                }
             }
             Message::WatchFailed(reason) => {
                 self.error = Some(AppError::Message(format!(
@@ -488,22 +564,23 @@ impl App {
             Message::FetchAll => {
                 if let Ok(workspace) = &self.workspace {
                     let repos = workspace.repos().to_vec();
-                    return Task::perform(async move { Repo::fetch_all(&repos) }, Message::Fetched);
+                    return on_thread(move || Repo::fetch_all(&repos))
+                        .map(|result| Message::Fetched(result.unwrap_or_else(thread_crashed)));
                 }
             }
             Message::Fetched(result) => {
                 self.report(result);
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
                 // everything rather than just the selected status.
-                self.workspace = self.scan();
-                self.load_status();
+                return self.rescan();
             }
             // One push/pull at a time: the button is disabled while one runs, and these
             // guards also cover a message that was already queued.
             Message::Sync if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Sync, Instant::now()));
-                    return Task::perform(async move { worktree.sync() }, Message::Synced);
+                    return on_thread(move || worktree.sync())
+                        .map(|result| Message::Synced(result.unwrap_or_else(thread_crashed)));
                 }
             }
             Message::Synced(result) => {
@@ -515,7 +592,8 @@ impl App {
             Message::Publish if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Publish, Instant::now()));
-                    return Task::perform(async move { worktree.publish() }, Message::Published);
+                    return on_thread(move || worktree.publish())
+                        .map(|result| Message::Published(result.unwrap_or_else(thread_crashed)));
                 }
             }
             Message::Published(result) => {
@@ -1021,7 +1099,47 @@ fn config_error(err: ConfigError) -> AppError {
     AppError::Message(format!("Config: {err}"))
 }
 
+/// The workspace under `root`, or why there isn't one.
+fn scan_root(root: Option<&Path>) -> Result<Workspace, AppError> {
+    match root {
+        // A relative root (hand-written in the config) would depend on where the app
+        // was launched from, which for a macOS app opened from Finder is `/`.
+        Some(root) if root.is_relative() => Err(AppError::Message(format!(
+            "Config: root `{}` must be an absolute path",
+            root.display()
+        ))),
+        Some(root) => Workspace::scan(root).map_err(AppError::from),
+        None => Err(AppError::Message(
+            "No folder to show yet. Choose the folder that holds your repos.".to_string(),
+        )),
+    }
+}
+
 /// A centered, muted message for panels with nothing to show (shared by the panels).
 fn empty_state<'a>(message: impl Into<String>, color: Color) -> Container<'a, Message> {
     container(text(message.into()).color(color).center()).padding([24.0, 8.0])
+}
+
+/// A task that runs `work` on a thread of its own and produces its result, or `None` if
+/// the thread panicked (its panic message is printed).
+///
+/// Blocking work (git, highlighting) can't just go in a `Task::perform` `async` block:
+/// iced polls a new task once on the UI thread, before its thread pool sees it
+/// (iced_winit's `update`), so work that never waits would run right there and freeze
+/// the app. Waiting on the channel makes that first poll return at once. (iced's own
+/// `task::blocking` does the same, but iced 0.14 doesn't make it public.)
+fn on_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Task<Option<T>> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        // An error only means nothing waits for the result any more.
+        let _ = sender.send(work());
+    });
+    Task::perform(receiver, Result::ok)
+}
+
+/// What a git action on its own thread (see `on_thread`) reports if that thread panicked.
+fn thread_crashed() -> Result<(), GitError> {
+    Err(GitError::CommandFailed(
+        "it stopped unexpectedly (an internal error)".to_string(),
+    ))
 }
