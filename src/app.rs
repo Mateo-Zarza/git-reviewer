@@ -25,11 +25,12 @@ use std::time::Instant;
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
+use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DIFF_SCROLLABLE;
-pub use panels::min_window_width;
-use panels::{Divider, PanelWidths};
+use panels::Divider;
+pub use panels::{PanelWidths, min_window_width};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -168,11 +169,12 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
-    /// The panel widths the user dragged to (what's shown may be narrower: see
-    /// `PanelWidths::fitted`).
-    panel_widths: PanelWidths,
-    /// The divider being dragged, if any.
-    dragging: Option<Divider>,
+    /// What's remembered between runs in `state.toml`: the panel widths the user dragged
+    /// to (what's shown may be narrower: see `PanelWidths::fitted`).
+    state: State,
+    /// The divider being dragged, if any, and the panel widths when the drag started
+    /// (every move is worked out from them: see `PanelWidths::dragged`).
+    dragging: Option<(Divider, PanelWidths)>,
     /// Infinite until the window first reports its size, which it does when it opens.
     window_width: f32,
 }
@@ -233,7 +235,7 @@ impl App {
             base_counts: None,
             base_error: None,
             collapsed: HashSet::new(),
-            panel_widths: PanelWidths::default(),
+            state: State::load(),
             dragging: None,
             window_width: f32::INFINITY,
         };
@@ -572,13 +574,23 @@ impl App {
                     self.collapsed.insert(section);
                 }
             }
-            Message::DividerGrabbed(divider) => self.dragging = Some(divider),
+            Message::DividerGrabbed(divider) => {
+                self.dragging = Some((divider, self.state.panels));
+            }
             Message::DividerDragged(x) => {
-                if let Some(divider) = self.dragging {
-                    self.panel_widths = self.panel_widths.dragged(divider, x, self.window_width);
+                if let Some((divider, start)) = self.dragging {
+                    self.state.panels = start.dragged(divider, x, self.window_width);
                 }
             }
-            Message::DividerReleased => self.dragging = None,
+            Message::DividerReleased => {
+                self.dragging = None;
+                // Saved once, when the drag ends, rather than on every move.
+                if let Err(err) = self.state.save() {
+                    self.error = Some(AppError::Message(format!(
+                        "Couldn't save the panel widths: {err}"
+                    )));
+                }
+            }
             Message::WindowResized(width) => self.window_width = width,
         }
         Task::none()
@@ -650,7 +662,7 @@ impl App {
                 .into()
             }
             Ok(workspace) => {
-                let widths = self.panel_widths.fitted(self.window_width);
+                let widths = self.state.panels.fitted(self.window_width);
                 // The dividers' grab areas lie over the panels rather than between them.
                 stack![
                     row![

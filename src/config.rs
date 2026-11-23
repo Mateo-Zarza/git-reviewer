@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,10 +59,15 @@ impl fmt::Display for ConfigError {
 }
 
 impl Config {
-    pub fn path() -> Result<PathBuf, ConfigError> {
+    /// The app's folder in the platform's config folder, which also holds `state.toml`.
+    pub fn dir() -> Result<PathBuf, ConfigError> {
         dirs::config_dir()
-            .map(|dir| dir.join(APP_DIR).join(FILE_NAME))
+            .map(|dir| dir.join(APP_DIR))
             .ok_or(ConfigError::NoConfigDir)
+    }
+
+    pub fn path() -> Result<PathBuf, ConfigError> {
+        Ok(Config::dir()?.join(FILE_NAME))
     }
 
     /// Reads the config. A missing file is a normal first run and gives the defaults;
@@ -83,19 +88,23 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), ConfigError> {
-        let path = Config::path()?;
-        let text = toml::to_string_pretty(self).map_err(ConfigError::Serialize)?;
-
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|err| ConfigError::Io(dir.to_path_buf(), err))?;
-        }
-        fs::write(&path, text).map_err(|err| ConfigError::Io(path, err))
+        write_toml(&Config::path()?, self)
     }
 
     /// The configured base branch for the repo in folder `repo_name`, if any.
     pub fn base_for(&self, repo_name: &str) -> Option<&str> {
         self.bases.get(repo_name).map(String::as_str)
     }
+}
+
+/// Writes `value` as TOML to `path`, creating its folder first if needed.
+pub fn write_toml(path: &Path, value: &impl Serialize) -> Result<(), ConfigError> {
+    let text = toml::to_string_pretty(value).map_err(ConfigError::Serialize)?;
+
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|err| ConfigError::Io(dir.to_path_buf(), err))?;
+    }
+    fs::write(path, text).map_err(|err| ConfigError::Io(path.to_path_buf(), err))
 }
 
 #[cfg(test)]

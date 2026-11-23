@@ -6,6 +6,7 @@
 use iced::event::{self, Status};
 use iced::widget::{mouse_area, opaque, row, space};
 use iced::{Element, Event, Fill, Subscription, mouse, window};
+use serde::{Deserialize, Serialize};
 
 use super::{Message, changes};
 use crate::theme::layouts;
@@ -19,7 +20,10 @@ pub enum Divider {
 
 /// The widths the user chose. The window may be too narrow to show them in full; then
 /// `fitted` gives what's shown, and these stay untouched for when it grows again.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Saved in `state.toml`; a missing key there gives that panel's default. Whatever a
+/// hand-edited one says is still clamped by `fitted`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PanelWidths {
     pub sidebar: f32,
     pub changes: f32,
@@ -53,26 +57,43 @@ impl PanelWidths {
         PanelWidths { sidebar, changes }
     }
 
-    /// The widths after dragging `divider` to `x`, starting from what's on screen. The
-    /// other panel keeps its width; the dragged one stops at its own minimum and where
-    /// the diff would go below its minimum.
+    /// The widths after dragging `divider` to `x`, where `self` is the widths when the
+    /// drag started. Like VS Code, only the two panels beside the divider change, and
+    /// each move is worked out from the start, so dragging back undoes a push:
+    /// - the sidebar's divider trades width with the changes panel, so the divider on
+    ///   the changes panel's right stays put until that panel is at its minimum; then
+    ///   it's pushed along, into the diff;
+    /// - the changes panel's divider trades width with the diff going right; going
+    ///   left, it squeezes the changes panel to its minimum, then pushes the sidebar's
+    ///   divider along.
+    ///
+    /// Either stops when the panels it squeezes are all at their minimums.
     pub fn dragged(self, divider: Divider, x: f32, available: f32) -> PanelWidths {
-        let mut widths = self.fitted(available);
+        let start = self.fitted(available);
         let room = side_room(available);
 
         // `min` then `max`, not `clamp`: `clamp` panics when the window is so narrow
         // that the upper bound is below the minimum.
         match divider {
             Divider::Sidebar => {
-                widths.sidebar = x.min(room - widths.changes).max(layouts::SIDEBAR_MIN_WIDTH);
+                let sidebar = x
+                    .min(room - changes::min_width())
+                    .max(layouts::SIDEBAR_MIN_WIDTH);
+                let changes = (start.sidebar + start.changes - sidebar).max(changes::min_width());
+                PanelWidths { sidebar, changes }
             }
             Divider::Changes => {
-                widths.changes = (x - widths.sidebar - layouts::DIVIDER_WIDTH)
-                    .min(room - widths.sidebar)
-                    .max(changes::min_width());
+                // Both panels together reach the divider, less the sidebar's own.
+                let both = (x - layouts::DIVIDER_WIDTH)
+                    .min(room)
+                    .max(layouts::SIDEBAR_MIN_WIDTH + changes::min_width());
+                let sidebar = start.sidebar.min(both - changes::min_width());
+                PanelWidths {
+                    sidebar,
+                    changes: both - sidebar,
+                }
             }
         }
-        widths
     }
 }
 
@@ -186,15 +207,72 @@ mod tests {
     }
 
     #[test]
-    fn test_drag_sidebar() {
-        let widths = PanelWidths::default();
-        assert_eq!(widths.dragged(Divider::Sidebar, 400.0, WIDE).sidebar, 400.0);
-        // Stops at its minimum, and the changes panel keeps its width.
-        let dragged = widths.dragged(Divider::Sidebar, 10.0, WIDE);
+    fn test_drag_sidebar_keeps_the_changes_divider_in_place() {
+        let start = PanelWidths {
+            sidebar: 260.0,
+            changes: 400.0,
+        };
+        // The changes panel takes the difference: its right edge doesn't move.
+        let dragged = start.dragged(Divider::Sidebar, 300.0, WIDE);
+        assert_eq!(dragged.sidebar, 300.0);
+        assert_eq!(dragged.sidebar + dragged.changes, 660.0);
+
+        // Stops at the sidebar's minimum; the changes panel grows by as much.
+        let dragged = start.dragged(Divider::Sidebar, 10.0, WIDE);
         assert_eq!(dragged.sidebar, layouts::SIDEBAR_MIN_WIDTH);
-        assert_eq!(dragged.changes, widths.changes);
-        // Stops where the diff would go below its minimum.
-        let dragged = widths.dragged(Divider::Sidebar, WIDE, WIDE);
+        assert_eq!(dragged.sidebar + dragged.changes, 660.0);
+    }
+
+    #[test]
+    fn test_drag_sidebar_pushes_a_squeezed_changes_panel() {
+        let start = PanelWidths {
+            sidebar: 260.0,
+            changes: 400.0,
+        };
+        // Past the changes panel's minimum, the panel is pushed along into the diff.
+        let dragged = start.dragged(Divider::Sidebar, 600.0, WIDE);
+        assert_eq!(dragged.sidebar, 600.0);
+        assert_eq!(dragged.changes, changes::min_width());
+
+        // Never past the diff's minimum.
+        let dragged = start.dragged(Divider::Sidebar, WIDE, WIDE);
+        assert_eq!(
+            dragged.sidebar + dragged.changes,
+            WIDE - layouts::DIFF_MIN_WIDTH - 2.0
+        );
+
+        // Worked out from the start, so dragging back undoes the push.
+        assert_eq!(start.dragged(Divider::Sidebar, 260.0, WIDE), start);
+    }
+
+    #[test]
+    fn test_drag_changes_left_pushes_the_sidebar_divider() {
+        let start = PanelWidths {
+            sidebar: 400.0,
+            changes: 400.0,
+        };
+        let min = changes::min_width();
+
+        // Squeezed to its minimum, the changes panel pushes the sidebar's divider.
+        let x = 300.0 + 1.0 + min;
+        let dragged = start.dragged(Divider::Changes, x, WIDE);
+        assert_eq!(dragged.changes, min);
+        assert_eq!(dragged.sidebar, 300.0);
+
+        // Until the sidebar is at its minimum too.
+        let dragged = start.dragged(Divider::Changes, 0.0, WIDE);
+        assert_eq!(dragged.sidebar, layouts::SIDEBAR_MIN_WIDTH);
+        assert_eq!(dragged.changes, min);
+
+        // Worked out from the start, so dragging back undoes the push.
+        let x = 400.0 + 1.0 + 400.0;
+        assert_eq!(start.dragged(Divider::Changes, x, WIDE), start);
+    }
+
+    #[test]
+    fn test_drag_changes_right_stops_at_the_diff_minimum() {
+        let dragged = PanelWidths::default().dragged(Divider::Changes, WIDE, WIDE);
+        assert_eq!(dragged.sidebar, PanelWidths::default().sidebar);
         assert_eq!(
             dragged.sidebar + dragged.changes,
             WIDE - layouts::DIFF_MIN_WIDTH - 2.0
