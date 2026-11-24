@@ -11,6 +11,10 @@ updates:
     groups:
       crates:
         update-types: [minor, patch]
+    ignore:
+      # resvg stays on the version iced uses (see Cargo.toml), so the window icon adds no
+      # second copy of it. It moves when iced does.
+      - dependency-name: resvg
 
   - package-ecosystem: github-actions
     directory: /
