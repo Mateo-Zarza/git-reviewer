@@ -49,13 +49,16 @@ The builds aren't code-signed, so each OS warns you the first time:
 - **Windows:** run the `.exe`. If SmartScreen says "Windows protected your PC", click
   **More info → Run anyway**.
 
-On **Linux**, install it into `~/.local`, which puts **Git Reviewer** in your app menu:
+On **Linux**, extract it and run its install script, which puts **Git Reviewer** in your
+app menu (the files go in `~/.local`):
 
 ```sh
-tar -xzf git-reviewer-<version>-linux-x64.tar.gz -C ~/.local --strip-components=1
+tar -xzf git-reviewer-<version>-linux-x64.tar.gz
+./git-reviewer-<version>-linux-x64/install.sh
 ```
 
-Or extract it anywhere and run `bin/git-reviewer` from the folder. It needs glibc 2.35
+`install.sh --uninstall` removes it again. Or skip the script and run `bin/git-reviewer`
+from the extracted folder. It needs glibc 2.35
 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later). **Choose folder…** opens your
 desktop's folder picker through xdg-desktop-portal, which GNOME, KDE, Cinnamon and most
 other desktops come with.

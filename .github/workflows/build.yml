@@ -138,9 +138,9 @@ jobs:
           rm -rf "$app"
 
       # One folder laid out like ~/.local: the binary in bin/, and in share/ the launcher
-      # entry and its icon, named after the app id set in main.rs. Extracted into
-      # ~/.local with --strip-components=1, that installs it; extracted anywhere else,
-      # bin/git-reviewer runs from there. tar keeps the executable bit.
+      # entry and its icon, named after the app id set in main.rs. Its install.sh
+      # copies them into ~/.local; without it, bin/git-reviewer runs from the folder.
+      # tar keeps the executable bits.
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -149,6 +149,7 @@ jobs:
           install -Dm755 "target/$TARGET/release/git-reviewer" "$dir/bin/git-reviewer"
           install -Dm644 "assets/linux/$id.desktop" "$dir/share/applications/$id.desktop"
           install -Dm644 assets/app-icon/icon.svg "$dir/share/icons/hicolor/scalable/apps/$id.svg"
+          install -Dm755 assets/linux/install.sh "$dir/install.sh"
 
           mkdir dist
           tar -czf "dist/$dir.tar.gz" "$dir"
